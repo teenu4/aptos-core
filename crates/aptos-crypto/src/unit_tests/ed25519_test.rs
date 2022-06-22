@@ -18,6 +18,7 @@ use core::{
 };
 use ed25519_dalek::ed25519::signature::Verifier as _;
 
+use crate::validatable::{Validatable, Validate};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use digest::Digest;
 use proptest::{collection::vec, prelude::*};
@@ -207,6 +208,7 @@ proptest! {
 
         let bad_key = ed25519_dalek::PublicKey::from_bytes(&bad_pub_key_point.compress().to_bytes()).unwrap();
         // We check that we would have caught this one on the public key
+        // NOTE: This will fail now, since Ed25519PublicKey::TryFrom<&[u8]> no longer checks for small subgroup membership
         prop_assert!(Ed25519PublicKey::try_from(&bad_pub_key_point.compress().to_bytes()[..]).is_err());
 
         let bad_signature = ed25519_dalek::Signature::from_bytes(&[
@@ -439,18 +441,23 @@ proptest! {
 }
 
 // Test against known small subgroup public keys.
+// NOTE: Ignored for now, because our signature verification code implicitly checks the PK for
+// small subgroup membership, so our Validate implementation is a dummy implementation.
 #[ignore]
 #[test]
 fn test_publickey_smallorder() {
     for torsion_point in &EIGHT_TORSION {
         let serialized: &[u8] = torsion_point;
+
         // We expect from_bytes_unchecked to pass, as it does not validate the key.
-        assert!(Ed25519PublicKey::from_bytes_unchecked(serialized).is_ok());
-        // from_bytes will fail on invalid key.
-        assert_eq!(
-            Ed25519PublicKey::try_from(serialized),
-            Err(CryptoMaterialError::SmallSubgroupError)
-        );
+        let result = Ed25519PublicKey::from_bytes_unchecked(serialized);
+        assert!(result.is_ok());
+        let pk = result.unwrap();
+
+        // ...but we expect validation to fail using the Validatable trait
+        let unvalidated = pk.to_unvalidated();
+        let pkv = Validatable::<Ed25519PublicKey>::new_unvalidated(unvalidated);
+        assert!(pkv.validate().is_err());
     }
 }
 
