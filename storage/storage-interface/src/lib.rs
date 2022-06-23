@@ -468,6 +468,8 @@ pub trait DbReader: Send + Sync {
         &self,
         state_key: &StateKey,
         version: Version,
+        counter: &mut Option<&mut [u128]>,
+        latency: &mut Option<&mut [u128]>,
     ) -> Result<(Option<StateValue>, SparseMerkleProof)> {
         unimplemented!()
     }
@@ -570,8 +572,12 @@ impl MoveStorage for &dyn DbReader {
         access_path: AccessPath,
         version: Version,
     ) -> Result<Vec<u8>> {
-        let (state_value, _) = self
-            .get_state_value_with_proof_by_version(&StateKey::AccessPath(access_path), version)?;
+        let (state_value, _) = self.get_state_value_with_proof_by_version(
+            &StateKey::AccessPath(access_path),
+            version,
+            &mut None,
+            &mut None,
+        )?;
 
         state_value
             .ok_or_else(|| format_err!("no value found in DB"))?
@@ -587,6 +593,8 @@ impl MoveStorage for &dyn DbReader {
                     access_path_for_config(config_id).path,
                 )),
                 version,
+                &mut None,
+                &mut None,
             )?
             .0;
         config_value_option

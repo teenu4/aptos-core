@@ -21,7 +21,9 @@ impl<'a> AccountWithStateView<'a> {
 
 impl<'a> AccountView for AccountWithStateView<'a> {
     fn get_state_value(&self, state_key: &StateKey) -> anyhow::Result<Option<Vec<u8>>> {
-        self.state_view.get_state_value(state_key)
+        assert!(false);
+        Ok(None)
+        //self.state_view.get_state_value(state_key)
     }
 
     fn get_account_address(&self) -> anyhow::Result<Option<AccountAddress>> {

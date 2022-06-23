@@ -99,6 +99,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     hash::Hash,
     marker::PhantomData,
+    time::Instant,
 };
 use thiserror::Error;
 
@@ -677,6 +678,8 @@ where
         &self,
         key: HashValue,
         version: Version,
+        counter: &mut Option<&mut [u128]>,
+        latency: &mut Option<&mut [u128]>,
     ) -> Result<(Option<(HashValue, (K, Version))>, SparseMerkleProof)> {
         // Empty tree just returns proof with no sibling hash.
         let mut next_node_key = NodeKey::new_empty_path(version);
@@ -687,6 +690,7 @@ where
         // We limit the number of loops here deliberately to avoid potential cyclic graph bugs
         // in the tree structure.
         for nibble_depth in 0..=ROOT_NIBBLE_HEIGHT {
+            let t = Instant::now();
             let next_node = self.reader.get_node(&next_node_key).map_err(|err| {
                 if nibble_depth == 0 {
                     MissingRootError { version }.into()
@@ -694,6 +698,12 @@ where
                     err
                 }
             })?;
+            if let Some(ref mut c) = counter {
+                if let Some(ref mut l) = latency {
+                    l[nibble_depth] += t.elapsed().as_nanos();
+                    c[nibble_depth] += 1;
+                }
+            }
             match next_node {
                 Node::Internal(internal_node) => {
                     let queried_child_index = nibble_iter
@@ -739,7 +749,8 @@ where
         rightmost_key_to_prove: HashValue,
         version: Version,
     ) -> Result<SparseMerkleRangeProof> {
-        let (account, proof) = self.get_with_proof(rightmost_key_to_prove, version)?;
+        let (account, proof) =
+            self.get_with_proof(rightmost_key_to_prove, version, &mut None, &mut None)?;
         ensure!(account.is_some(), "rightmost_key_to_prove must exist.");
 
         let siblings = proof
@@ -762,7 +773,10 @@ where
 
     #[cfg(test)]
     pub fn get(&self, key: HashValue, version: Version) -> Result<Option<HashValue>> {
-        Ok(self.get_with_proof(key, version)?.0.map(|x| x.0))
+        Ok(self
+            .get_with_proof(key, version, &mut None, &mut None)?
+            .0
+            .map(|x| x.0, None, None))
     }
 
     fn get_root_node(&self, version: Version) -> Result<Node<K>> {

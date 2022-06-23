@@ -106,6 +106,7 @@ enum Command {
 }
 
 fn main() {
+    aptos_logger::Logger::new().init();
     let _mp = MetricsPusher::start();
     let opt = Opt::from_args();
 
@@ -135,7 +136,6 @@ fn main() {
             data_dir,
             checkpoint_dir,
         } => {
-            aptos_logger::Logger::new().init();
             executor_benchmark::run_benchmark(
                 opt.block_size,
                 blocks,
