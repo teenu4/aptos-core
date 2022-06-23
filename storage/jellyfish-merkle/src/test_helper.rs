@@ -189,7 +189,9 @@ fn test_existent_keys_impl<'a, V: TestKey>(
     let root_hash = tree.get_root_hash(version).unwrap();
 
     for (key, value) in existent_kvs {
-        let (account, proof) = tree.get_with_proof(*key, version).unwrap();
+        let (account, proof) = tree
+            .get_with_proof(*key, version, &mut None, &mut None)
+            .unwrap();
         assert!(proof
             .verify_by_hash(root_hash, *key, account.as_ref().map(|v| v.0))
             .is_ok());
@@ -205,7 +207,9 @@ fn test_nonexistent_keys_impl<'a, V: TestKey>(
     let root_hash = tree.get_root_hash(version).unwrap();
 
     for key in nonexistent_keys {
-        let (account, proof) = tree.get_with_proof(*key, version).unwrap();
+        let (account, proof) = tree
+            .get_with_proof(*key, version, &mut None, &mut None)
+            .unwrap();
         assert!(proof.verify_by_hash(root_hash, *key, None).is_ok());
         assert!(account.is_none());
     }

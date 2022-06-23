@@ -32,10 +32,12 @@ impl ProofFetcher for SyncProofFetcher {
         &self,
         state_key: &StateKey,
         version: Version,
+        counter: &mut Option<&mut [u128]>,
+        latency: &mut Option<&mut [u128]>,
     ) -> anyhow::Result<(Option<StateValue>, Option<SparseMerkleProof>)> {
         let (state_value, proof) = self
             .reader
-            .get_state_value_with_proof_by_version(state_key, version)?;
+            .get_state_value_with_proof_by_version(state_key, version, counter, latency)?;
         // multiple threads may enter this code, and another thread might add
         // an address before this one. Thus the insertion might return a None here.
         self.state_proof_cache

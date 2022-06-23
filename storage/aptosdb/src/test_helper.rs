@@ -511,7 +511,7 @@ pub fn verify_committed_transactions(
         // Fetch and verify account states.
         for (state_key, state_value) in txn_to_commit.state_updates() {
             let (state_value_in_db, proof) = db
-                .get_state_value_with_proof_by_version(state_key, cur_ver)
+                .get_state_value_with_proof_by_version(state_key, cur_ver, &mut None, &mut None)
                 .unwrap();
             assert_eq!(state_value_in_db, Some(state_value.clone()));
             proof

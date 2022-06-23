@@ -6,12 +6,16 @@
 #[cfg(test)]
 mod state_store_test;
 
+mod lru_node_cache;
+mod versioned_node_cache;
+
 use crate::{
     change_set::ChangeSet,
     schema::{
         jellyfish_merkle_node::JellyfishMerkleNodeSchema, stale_node_index::StaleNodeIndexSchema,
         state_value::StateValueSchema,
     },
+    state_store::{lru_node_cache::LruNodeCache, versioned_node_cache::VersionedNodeCache},
     AptosDbError, OTHER_TIMERS_SECONDS,
 };
 use anyhow::{anyhow, ensure, format_err, Result};
@@ -20,6 +24,7 @@ use aptos_jellyfish_merkle::{
     iterator::JellyfishMerkleIterator, node_type::NodeKey, restore::StateSnapshotRestore,
     JellyfishMerkleTree, StateValueWriter, TreeReader, TreeWriter,
 };
+use aptos_metrics_core::{register_histogram, Histogram};
 use aptos_types::{
     nibble::{nibble_path::NibblePath, ROOT_NIBBLE_HEIGHT},
     proof::{SparseMerkleProof, SparseMerkleRangeProof},
@@ -30,21 +35,45 @@ use aptos_types::{
     },
     transaction::{Version, PRE_GENESIS_VERSION},
 };
+use once_cell::sync::Lazy;
+use rayon::prelude::*;
 use schemadb::{ReadOptions, SchemaBatch, DB};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use storage_interface::{DbReader, StateSnapshotReceiver};
 
 type LeafNode = aptos_jellyfish_merkle::node_type::LeafNode<StateKey>;
 type Node = aptos_jellyfish_merkle::node_type::Node<StateKey>;
 type NodeBatch = aptos_jellyfish_merkle::NodeBatch<StateKey>;
 type StateValueBatch = aptos_jellyfish_merkle::StateValueBatch<StateKey, StateValue>;
+pub type TreeUpdateBatch = aptos_jellyfish_merkle::TreeUpdateBatch<StateKey>;
 
 pub const MAX_VALUES_TO_FETCH_FOR_KEY_PREFIX: usize = 10_000;
 
+pub static LRU_CACHE: Lazy<Histogram> =
+    Lazy::new(|| register_histogram!("lru_cache_hit", "JMT lru cache hit latency.").unwrap());
+pub static VERSION_CACHE: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!("version_cache_hit", "JMT version cache hit latency.").unwrap()
+});
+pub static CACHE_MISS_TOTAL: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!("cache_miss_total", "JMT lru cache miss total latency.").unwrap()
+});
+
+pub static CACHE_MISS_READ: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!("cache_miss_read", "JMT lru cache miss read latency.").unwrap()
+});
+
+pub static PROOF_READ: Lazy<Histogram> =
+    Lazy::new(|| register_histogram!("proof_read", "proof read latency.").unwrap());
+
+pub static VALUE_READ: Lazy<Histogram> =
+    Lazy::new(|| register_histogram!("value_read", "value read latency.").unwrap());
+
 #[derive(Debug)]
-pub(crate) struct StateStore {
+pub struct StateStore {
     ledger_db: Arc<DB>,
     state_merkle_db: Arc<DB>,
+    version_cache: VersionedNodeCache,
+    lru_cache: LruNodeCache,
 }
 
 // "using an Arc<dyn DbReader> as an Arc<dyn StateReader>" is not allowed in stable Rust. Actually we
@@ -57,16 +86,26 @@ impl DbReader for StateStore {
         &self,
         state_key: &StateKey,
         version: Version,
+        counter: &mut Option<&mut [u128]>,
+        latency: &mut Option<&mut [u128]>,
     ) -> Result<(Option<StateValue>, SparseMerkleProof)> {
-        let (leaf_data, proof) =
-            JellyfishMerkleTree::new(self).get_with_proof(state_key.hash(), version)?;
-        Ok((
+        let t = Instant::now();
+        let (leaf_data, proof) = JellyfishMerkleTree::new(self).get_with_proof(
+            state_key.hash(),
+            version,
+            counter,
+            latency,
+        )?;
+        PROOF_READ.observe(t.elapsed().as_secs_f64() * 1000000000.0);
+        let r = Ok((
             match leaf_data {
                 Some((_, (key, version))) => Some(self.expect_value_by_version(&key, version)?),
                 None => None,
             },
             proof,
-        ))
+        ));
+        VALUE_READ.observe(t.elapsed().as_secs_f64() * 1000000000.0);
+        r
     }
 
     /// Get the lastest state value of the given key up to the given version. Only used for testing for now
@@ -110,6 +149,8 @@ impl StateStore {
         Self {
             ledger_db,
             state_merkle_db,
+            version_cache: VersionedNodeCache::new(),
+            lru_cache: LruNodeCache::new(4 * 1024 * 128),
         }
     }
 
@@ -245,7 +286,7 @@ impl StateStore {
         node_hashes: Option<&HashMap<NibblePath, HashValue>>,
         version: Version,
         base_version: Option<Version>,
-    ) -> Result<HashValue> {
+    ) -> Result<(HashValue, TreeUpdateBatch)> {
         let (new_root_hash, tree_update_batch) = {
             let _timer = OTHER_TIMERS_SECONDS
                 .with_label_values(&["jmt_update"])
@@ -259,33 +300,69 @@ impl StateStore {
             )
         }?;
 
-        let mut batch = SchemaBatch::new();
+        self.version_cache.add_version(
+            version,
+            tree_update_batch
+                .node_batch
+                .iter()
+                .flatten()
+                .cloned()
+                .collect(),
+        );
+
+        Ok((new_root_hash, tree_update_batch))
+    }
+
+    pub fn persist_tree_update_batch(&self, tree_update_batch: TreeUpdateBatch) -> Result<()> {
+        let batch = SchemaBatch::new();
         {
             let _timer = OTHER_TIMERS_SECONDS
-                .with_label_values(&["serialize_jmt_commit"])
+                .with_label_values(&["serialize_jmt_update"])
                 .start_timer();
 
-            add_node_batch(
-                &mut batch,
-                tree_update_batch
-                    .node_batch
-                    .iter()
-                    .flatten()
-                    .map(|(k, v)| (k, v)),
-            )?;
+            tree_update_batch
+                .node_batch
+                .iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .par_iter()
+                .with_min_len(100)
+                .map(|(node_key, node)| batch.put::<JellyfishMerkleNodeSchema>(node_key, node))
+                .collect::<Result<Vec<_>>>()?;
 
             tree_update_batch
                 .stale_node_index_batch
                 .iter()
                 .flatten()
+                .collect::<Vec<_>>()
+                .par_iter()
+                .with_min_len(100)
                 .map(|row| batch.put::<StaleNodeIndexSchema>(row, &()))
                 .collect::<Result<Vec<()>>>()?;
         }
 
-        // commit jellyfish merkle nodes
+        // commit
         self.state_merkle_db.write_schemas(batch)?;
 
-        Ok(new_root_hash)
+        // release version cache
+        self.version_cache.maybe_evict_version(&self.lru_cache);
+
+        Ok(())
+    }
+
+    pub fn save_snapshot(
+        &self,
+        value_set: Vec<(HashValue, &(HashValue, StateKey))>,
+        node_hashes: Option<&HashMap<NibblePath, HashValue>>,
+        version: Version,
+        base_version: Option<Version>,
+    ) -> Result<HashValue> {
+        let (root_hash, tree_update_batch) =
+            self.merklize_value_set(value_set, node_hashes, version, base_version)?;
+
+        self.persist_tree_update_batch(tree_update_batch)?;
+
+        Ok(root_hash)
     }
 
     pub fn get_root_hash(&self, version: Version) -> Result<HashValue> {
@@ -397,8 +474,44 @@ impl StateStore {
 
 impl TreeReader<StateKey> for StateStore {
     fn get_node_option(&self, node_key: &NodeKey) -> Result<Option<Node>> {
-        self.state_merkle_db
-            .get::<JellyfishMerkleNodeSchema>(node_key)
+        let mut t = Instant::now();
+        if (VERSION_CACHE.get_sample_count()
+            + LRU_CACHE.get_sample_count()
+            + CACHE_MISS_TOTAL.get_sample_count())
+        .checked_rem(131072)
+            == Some(0)
+        {
+            println!("version_cache_hit: {} {}, lru_cache: {}, {}, version_cache_miss: {}, {}, cache_miss_total: {}, {}",
+                VERSION_CACHE.get_sample_count(), VERSION_CACHE.get_sample_sum() / VERSION_CACHE.get_sample_count() as f64, LRU_CACHE.get_sample_count(), LRU_CACHE.get_sample_sum() / LRU_CACHE.get_sample_count() as f64, CACHE_MISS_READ.get_sample_count(), CACHE_MISS_READ.get_sample_sum() / CACHE_MISS_READ.get_sample_count() as f64, CACHE_MISS_TOTAL.get_sample_count(), CACHE_MISS_TOTAL.get_sample_sum() / CACHE_MISS_TOTAL.get_sample_count() as f64);
+            println!(
+                "proof read: {} {}, value read: {} {}",
+                PROOF_READ.get_sample_count(),
+                PROOF_READ.get_sample_sum() / PROOF_READ.get_sample_count() as f64,
+                VALUE_READ.get_sample_count(),
+                VALUE_READ.get_sample_sum() / VALUE_READ.get_sample_count() as f64
+            );
+        }
+        let node_opt = if let Some(node_cache) = self.version_cache.get_version(node_key.version())
+        {
+            node_cache.get(node_key).cloned()
+        } else {
+            CACHE_MISS_READ.observe(t.elapsed().as_secs_f64() * 1000000000.0);
+            t = Instant::now();
+            if let Some(node) = self.lru_cache.get(node_key) {
+                LRU_CACHE.observe(t.elapsed().as_secs_f64() * 1000000000.0);
+                Some(node)
+            } else {
+                let node_opt = self
+                    .state_merkle_db
+                    .get::<JellyfishMerkleNodeSchema>(node_key)?;
+                if let Some(node) = &node_opt {
+                    self.lru_cache.put(node_key.clone(), node.clone());
+                }
+                CACHE_MISS_TOTAL.observe(t.elapsed().as_secs_f64() * 1000000000.0);
+                node_opt
+            }
+        };
+        Ok(node_opt)
     }
 
     fn get_rightmost_leaf(&self) -> Result<Option<(NodeKey, LeafNode)>> {
