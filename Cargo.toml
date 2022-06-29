@@ -151,6 +151,7 @@ default-members = [
 
 [profile.release]
 debug = true
+overflow-checks = true
 
 [profile.cli]
 inherits = "release"
