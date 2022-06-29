@@ -17,7 +17,7 @@ use std::{
 };
 use storage_interface::jmt_update_refs;
 
-const NUM_MIN_COMMITS_TO_BATCH: usize = 20;
+const NUM_MIN_COMMITS_TO_BATCH: usize = 5;
 
 pub struct StateCommitMaker {
     delta_receiver: mpsc::Receiver<StateSnapshotDelta>,
@@ -69,7 +69,7 @@ impl StateCommitMaker {
                 }
                 Err(TryRecvError::Empty) => {
                     if self.num_pending_commits < NUM_MIN_COMMITS_TO_BATCH {
-                        std::thread::sleep(time::Duration::from_millis(200));
+                        std::thread::sleep(time::Duration::from_secs(1));
                     } else {
                         self.make_state_commit();
                     }
@@ -113,9 +113,10 @@ impl StateCommitMaker {
             .unwrap();
 
         println!(
-            "commit version: {}, took {} ns",
+            "commit version: {}, # blocks: {}, took {} ms",
             self.version,
-            t.elapsed().as_nanos()
+            self.num_pending_commits,
+            t.elapsed().as_millis()
         );
 
         // reset pending updates

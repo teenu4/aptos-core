@@ -202,7 +202,7 @@ impl TransactionGenerator {
     ) -> Vec<Vec<Transaction>> {
         let mut txn_block = Vec::new();
 
-        let num_seed_accounts = (self.num_accounts / 1000).max(1).min(1000);
+        let num_seed_accounts = (self.num_accounts / 1000).max(1).min(100000);
         let seed_accounts_cache = Self::gen_account_cache(num_seed_accounts, true);
 
         println!(
@@ -272,7 +272,6 @@ impl TransactionGenerator {
         );
         let mut generator = AccountGenerator::new_for_user_accounts();
         let bar = get_progress_bar(self.num_accounts);
-
         for chunk in &(0..self.num_accounts).chunks(block_size) {
             let transactions: Vec<_> = chunk
                 .map(|_| {

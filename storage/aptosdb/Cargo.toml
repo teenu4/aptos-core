@@ -26,6 +26,7 @@ rayon = "1.5.2"
 serde = "1.0.137"
 thiserror = "1.0.31"
 cpu-time = "1.0.0"
+moka = "0.5.1"
 
 accumulator = { path = "../accumulator" }
 aptos-config = { path = "../../config" }

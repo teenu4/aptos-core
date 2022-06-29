@@ -67,6 +67,7 @@ impl VersionedNodeCache {
         };
 
         if let Some((version, cache)) = to_evict {
+            /*
             cache
                 .iter()
                 .collect::<Vec<_>>()
@@ -74,7 +75,7 @@ impl VersionedNodeCache {
                 .with_min_len(100)
                 .for_each(|(node_key, node)| {
                     lru_cache.put(node_key.clone(), node.clone());
-                });
+                });*/
 
             let evicted = self.inner.write().pop_front();
             assert_eq!(evicted, Some((version, cache)));

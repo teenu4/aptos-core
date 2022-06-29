@@ -32,9 +32,9 @@ impl Pipeline {
 
         let (block_sender, block_receiver) =
             mpsc::sync_channel::<Vec<Transaction>>(50 /* bound */);
-        let (commit_sender, commit_receiver) = mpsc::sync_channel(3 /* bound */);
+        let (commit_sender, commit_receiver) = mpsc::sync_channel(5 /* bound */);
         let (state_delta_sender, state_delta_receiver) = mpsc::sync_channel(5 /* bound */);
-        let (state_commit_sender, state_commit_receiver) = mpsc::sync_channel(2 /* bound */);
+        let (state_commit_sender, state_commit_receiver) = mpsc::sync_channel(5 /* bound */);
 
         let exe_thread = std::thread::Builder::new()
             .name("txn_executor".to_string())

@@ -6,11 +6,11 @@ use crate::metrics::{NODE_CACHE_HIT, NODE_CACHE_TOTAL};
 use aptos_infallible::Mutex;
 use aptos_jellyfish_merkle::node_type::NodeKey;
 use aptos_types::{nibble::nibble_path::NibblePath, transaction::Version};
-use cpu_time::ThreadTime;
 use lru::LruCache;
 use std::time::Instant;
 
 use once_cell::sync::Lazy;
+use std::cell::RefCell;
 
 use aptos_metrics_core::{register_histogram, Histogram};
 
@@ -55,23 +55,7 @@ impl LruNodeCache {
     }
 
     pub fn get(&self, node_key: &NodeKey) -> Option<Node> {
-        let mut t = Instant::now();
-        //NODE_CACHE_TOTAL.with_label_values(&["position_lru"]).inc();
-        let mut r = self.shards[Self::shard(node_key.nibble_path()) as usize].lock();
-        READ_LOCK_TIME.observe(t.elapsed().as_secs_f64() * 1000000000.0);
-        if READ_LOCK_TIME.get_sample_count().checked_rem(65536) == Some(0) {
-            println!(
-                "read_lock: {}, write_lock: {}, cache_latency: {}, cache_cpu_time: {}, len: {}",
-                READ_LOCK_TIME.get_sample_sum() / READ_LOCK_TIME.get_sample_count() as f64,
-                WRITE_LOCK_TIME.get_sample_sum() / WRITE_LOCK_TIME.get_sample_count() as f64,
-                READ_CACHE_TIME.get_sample_sum() / READ_CACHE_TIME.get_sample_count() as f64,
-                READ_CACHE_CPU_TIME.get_sample_sum()
-                    / READ_CACHE_CPU_TIME.get_sample_count() as f64,
-                r.len(),
-            );
-        }
-        t = Instant::now();
-        let tt = ThreadTime::now();
+        let mut r = self.shards[Self::shard(&node_key.nibble_path()) as usize].lock();
         let ret = r.get(node_key.nibble_path()).and_then(|(version, node)| {
             if *version == node_key.version() {
                 //NODE_CACHE_HIT.with_label_values(&["position_lru"]).inc();
@@ -80,8 +64,6 @@ impl LruNodeCache {
                 None
             }
         });
-        READ_CACHE_TIME.observe(t.elapsed().as_secs_f64() * 1000000000.0);
-        READ_CACHE_CPU_TIME.observe(tt.elapsed().as_secs_f64() * 1000000000.0);
         ret
     }
 
@@ -89,7 +71,6 @@ impl LruNodeCache {
         let t = Instant::now();
         let (version, nibble_path) = node_key.unpack();
         let mut w = self.shards[Self::shard(&nibble_path) as usize].lock();
-        WRITE_LOCK_TIME.observe(t.elapsed().as_secs_f64() * 1000000000.0);
         let value = (version, node);
         w.put(nibble_path, value);
     }

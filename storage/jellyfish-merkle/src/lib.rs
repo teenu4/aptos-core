@@ -678,8 +678,6 @@ where
         &self,
         key: HashValue,
         version: Version,
-        counter: &mut Option<&mut [u128]>,
-        latency: &mut Option<&mut [u128]>,
     ) -> Result<(Option<(HashValue, (K, Version))>, SparseMerkleProof)> {
         // Empty tree just returns proof with no sibling hash.
         let mut next_node_key = NodeKey::new_empty_path(version);
@@ -698,12 +696,6 @@ where
                     err
                 }
             })?;
-            if let Some(ref mut c) = counter {
-                if let Some(ref mut l) = latency {
-                    l[nibble_depth] += t.elapsed().as_nanos();
-                    c[nibble_depth] += 1;
-                }
-            }
             match next_node {
                 Node::Internal(internal_node) => {
                     let queried_child_index = nibble_iter
@@ -749,8 +741,7 @@ where
         rightmost_key_to_prove: HashValue,
         version: Version,
     ) -> Result<SparseMerkleRangeProof> {
-        let (account, proof) =
-            self.get_with_proof(rightmost_key_to_prove, version, &mut None, &mut None)?;
+        let (account, proof) = self.get_with_proof(rightmost_key_to_prove, version)?;
         ensure!(account.is_some(), "rightmost_key_to_prove must exist.");
 
         let siblings = proof
@@ -773,10 +764,7 @@ where
 
     #[cfg(test)]
     pub fn get(&self, key: HashValue, version: Version) -> Result<Option<HashValue>> {
-        Ok(self
-            .get_with_proof(key, version, &mut None, &mut None)?
-            .0
-            .map(|x| x.0, None, None))
+        Ok(self.get_with_proof(key, version)?.0.map(|x| x.0))
     }
 
     fn get_root_node(&self, version: Version) -> Result<Node<K>> {

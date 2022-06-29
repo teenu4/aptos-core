@@ -73,8 +73,6 @@ pub struct CachedStateView {
     /// in JMT node.
     state_cache: RwLock<HashMap<StateKey, StateValue>>,
     proof_fetcher: Arc<dyn ProofFetcher>,
-    counter: RwLock<[u128; 40]>,
-    latency: RwLock<[u128; 40]>,
 }
 
 impl CachedStateView {
@@ -100,8 +98,6 @@ impl CachedStateView {
             speculative_state,
             state_cache: RwLock::new(HashMap::new()),
             proof_fetcher,
-            counter: RwLock::new([0; 40]),
-            latency: RwLock::new([0; 40]),
         })
     }
 
@@ -123,15 +119,6 @@ impl CachedStateView {
         }
     }
 
-    pub fn output(&self) {
-        for i in 0..12 {
-            let a = self.counter.read()[i];
-            if a != 0 {
-                println!("{}: {}, {}", i, a, self.latency.read()[i] / a);
-            }
-        }
-    }
-
     fn get_state_value_internal(&self, state_key: &StateKey) -> Result<Option<StateValue>> {
         // Do most of the work outside the write lock.
         let key_hash = state_key.hash();
@@ -143,12 +130,9 @@ impl CachedStateView {
             StateStoreStatus::ExistsInDB | StateStoreStatus::Unknown => {
                 match self.snapshot {
                     Some((version, root_hash)) => {
-                        let (value, proof) = self.proof_fetcher.fetch_state_value_and_proof(
-                            state_key,
-                            version,
-                            &mut Some(self.counter.write().as_mut()),
-                            &mut Some(self.latency.write().as_mut()),
-                        )?;
+                        let (value, proof) = self
+                            .proof_fetcher
+                            .fetch_state_value_and_proof(state_key, version)?;
                         // TODO: proof verification can be opted out, for performance
                         if let Some(proof) = proof {
                             proof

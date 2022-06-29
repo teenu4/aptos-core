@@ -16,8 +16,6 @@ pub trait ProofFetcher: Sync + Send {
         &self,
         state_key: &StateKey,
         version: Version,
-        counter: &mut Option<&mut [u128]>,
-        latency: &mut Option<&mut [u128]>,
     ) -> anyhow::Result<(Option<StateValue>, Option<SparseMerkleProof>)>;
 
     /// API to return all the proofs fetched by the proof fetcher so far.

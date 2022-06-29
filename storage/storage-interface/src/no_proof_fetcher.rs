@@ -27,8 +27,6 @@ impl ProofFetcher for NoProofFetcher {
         &self,
         state_key: &StateKey,
         version: Version,
-        counter: &mut Option<&mut [u128]>,
-        latency: &mut Option<&mut [u128]>,
     ) -> anyhow::Result<(Option<StateValue>, Option<SparseMerkleProof>)> {
         Ok((
             self.reader.get_state_value_by_version(state_key, version)?,

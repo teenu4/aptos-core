@@ -748,7 +748,7 @@ impl DbReader for AptosDB {
             let version = ledger_info_with_sigs.ledger_info().version();
             let (blob, _proof) = self
                 .state_store
-                .get_state_value_with_proof_by_version(&state_key, version, &mut None, &mut None)?;
+                .get_state_value_with_proof_by_version(&state_key, version)?;
             Ok(blob)
         })
     }
@@ -1114,8 +1114,6 @@ impl DbReader for AptosDB {
         &self,
         state_store_key: &StateKey,
         version: Version,
-        counter: &mut Option<&mut [u128]>,
-        latency: &mut Option<&mut [u128]>,
     ) -> Result<(Option<StateValue>, SparseMerkleProof)> {
         gauged_api("get_state_value_with_proof_by_version", || {
             error_if_version_is_pruned(
@@ -1125,12 +1123,8 @@ impl DbReader for AptosDB {
                 version,
             )?;
 
-            self.state_store.get_state_value_with_proof_by_version(
-                state_store_key,
-                version,
-                counter,
-                latency,
-            )
+            self.state_store
+                .get_state_value_with_proof_by_version(state_store_key, version)
         })
     }
 
