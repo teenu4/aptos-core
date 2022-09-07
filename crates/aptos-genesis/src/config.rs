@@ -183,6 +183,8 @@ impl TryFrom<ValidatorConfiguration> for Validator {
     }
 }
 
+const LOCALHOST: &str = "localhost";
+
 /// Combined Host (DnsName or IP) and port
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostAndPort {
@@ -191,6 +193,13 @@ pub struct HostAndPort {
 }
 
 impl HostAndPort {
+    pub fn local(port: u16) -> anyhow::Result<HostAndPort> {
+        Ok(HostAndPort {
+            host: DnsName::try_from(LOCALHOST.to_string())?,
+            port,
+        })
+    }
+
     pub fn as_network_address(&self, key: x25519::PublicKey) -> anyhow::Result<NetworkAddress> {
         let host = self.host.to_string();
 
@@ -234,7 +243,7 @@ impl FromStr for HostAndPort {
                 "Invalid host and port, must be of the form 'host:port` e.g. '127.0.0.1:6180'",
             ))
         } else {
-            let host = DnsName::from_str(*parts.get(0).unwrap())?;
+            let host = DnsName::from_str(*parts.first().unwrap())?;
             let port = u16::from_str(parts.get(1).unwrap())?;
             Ok(HostAndPort { host, port })
         }

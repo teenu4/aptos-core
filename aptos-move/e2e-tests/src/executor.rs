@@ -19,13 +19,14 @@ use crate::{
 };
 use aptos_bitvec::BitVec;
 use aptos_crypto::HashValue;
-use aptos_gas::NativeGasParameters;
+use aptos_gas::{AbstractValueSizeGasParameters, NativeGasParameters};
 use aptos_keygen::KeyGen;
 use aptos_state_view::StateView;
 use aptos_types::{
     access_path::AccessPath,
     account_config::{
-        new_block_event_key, AccountResource, CoinStoreResource, NewBlockEvent, CORE_CODE_ADDRESS,
+        new_block_event_key, AccountResource, CoinInfoResource, CoinStoreResource, NewBlockEvent,
+        CORE_CODE_ADDRESS,
     },
     block_metadata::BlockMetadata,
     on_chain_config::{OnChainConfig, ValidatorSet, Version},
@@ -38,7 +39,7 @@ use aptos_types::{
     write_set::WriteSet,
 };
 use aptos_vm::{
-    data_cache::{AsMoveResolver, RemoteStorage},
+    data_cache::{AsMoveResolver, StorageAdapter},
     move_vm_ext::{MoveVmExt, SessionId},
     parallel_executor::ParallelAptosVM,
     AptosVM, VMExecutor, VMValidator,
@@ -95,6 +96,8 @@ impl FakeExecutor {
             no_parallel_exec: false,
         };
         executor.apply_write_set(write_set);
+        // As a set effect, also allow module bundle txns. TODO: Remove
+        aptos_vm::aptos_vm::allow_module_bundle_for_test();
         executor
     }
 
@@ -246,6 +249,11 @@ impl FakeExecutor {
         self.data_store.add_account_data(account_data)
     }
 
+    /// Adds coin info to this executor's data store.
+    pub fn add_coin_info(&mut self) {
+        self.data_store.add_coin_info()
+    }
+
     /// Adds a module to this executor's data store.
     ///
     /// Does not do any sort of verification on the module.
@@ -278,6 +286,29 @@ impl FakeExecutor {
     /// Reads the CoinStore resource value for an account from this executor's data store.
     pub fn read_coin_store_resource(&self, account: &Account) -> Option<CoinStoreResource> {
         self.read_coin_store_resource_at_address(account.address())
+    }
+
+    /// Reads supply from CoinInfo resource value from this executor's data store.
+    pub fn read_coin_supply(&self) -> Option<u128> {
+        self.read_coin_info_resource()
+            .expect("coin info must exist in data store")
+            .supply()
+            .as_ref()
+            .map(|o| match o.aggregator.as_ref() {
+                Some(aggregator) => {
+                    let state_key = aggregator.state_key();
+                    let value_bytes = self
+                        .read_state_value(&state_key)
+                        .expect("aggregator value must exist in data store");
+                    bcs::from_bytes(&value_bytes).unwrap()
+                }
+                None => o.integer.as_ref().unwrap().value,
+            })
+    }
+
+    /// Reads the CoinInfo resource value from this executor's data store.
+    pub fn read_coin_info_resource(&self) -> Option<CoinInfoResource> {
+        self.read_resource(&AccountAddress::ONE)
     }
 
     /// Reads the CoinStore resource value for an account under the given address from this executor's
@@ -515,8 +546,12 @@ impl FakeExecutor {
     ) {
         let write_set = {
             // TODO(Gas): we probably want to switch to non-zero costs in the future
-            let vm = MoveVmExt::new(NativeGasParameters::zeros()).unwrap();
-            let remote_view = RemoteStorage::new(&self.data_store);
+            let vm = MoveVmExt::new(
+                NativeGasParameters::zeros(),
+                AbstractValueSizeGasParameters::zeros(),
+            )
+            .unwrap();
+            let remote_view = StorageAdapter::new(&self.data_store);
             let mut session = vm.new_session(&remote_view, SessionId::void());
             session
                 .execute_function_bypass_visibility(
@@ -554,8 +589,12 @@ impl FakeExecutor {
         args: Vec<Vec<u8>>,
     ) -> Result<WriteSet, VMStatus> {
         // TODO(Gas): we probably want to switch to non-zero costs in the future
-        let vm = MoveVmExt::new(NativeGasParameters::zeros()).unwrap();
-        let remote_view = RemoteStorage::new(&self.data_store);
+        let vm = MoveVmExt::new(
+            NativeGasParameters::zeros(),
+            AbstractValueSizeGasParameters::zeros(),
+        )
+        .unwrap();
+        let remote_view = StorageAdapter::new(&self.data_store);
         let mut session = vm.new_session(&remote_view, SessionId::void());
         session
             .execute_function_bypass_visibility(

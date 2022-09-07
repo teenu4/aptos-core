@@ -1,7 +1,6 @@
 // Copyright (c) Aptos
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::test_utils::reconfig;
 use crate::{
     smoke_test_environment::new_local_swarm_with_aptos,
     test_utils::{
@@ -15,7 +14,7 @@ use anyhow::{bail, Result};
 use aptos_temppath::TempPath;
 use aptos_types::{transaction::Version, waypoint::Waypoint};
 use backup_cli::metadata::view::BackupStorageState;
-use forge::{NodeExt, Swarm, SwarmExt};
+use forge::{reconfig, NodeExt, Swarm, SwarmExt};
 use std::{
     fs,
     path::Path,
@@ -47,7 +46,7 @@ async fn test_db_restore() {
     // we need to wait for all nodes to see it, as client_1 is different node from the
     // one creating accounts above
     swarm
-        .wait_for_all_nodes_to_catchup(Instant::now() + Duration::from_secs(30))
+        .wait_for_all_nodes_to_catchup(Duration::from_secs(30))
         .await
         .unwrap();
 
@@ -151,7 +150,7 @@ async fn test_db_restore() {
         .unwrap();
     // verify it's caught up
     swarm
-        .wait_for_all_nodes_to_catchup(Instant::now() + Duration::from_secs(MAX_WAIT_SECS))
+        .wait_for_all_nodes_to_catchup(Duration::from_secs(MAX_WAIT_SECS))
         .await
         .unwrap();
 

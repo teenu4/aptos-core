@@ -6,10 +6,9 @@ use crate::{counters::CRITICAL_ERRORS, create_access_path, logging::AdapterLogSc
 #[allow(unused_imports)]
 use anyhow::format_err;
 use anyhow::Error;
-use aptos_gas::InternalGas;
 use aptos_logger::prelude::*;
-use aptos_state_view::state_storage_usage::StateStorageUsage;
 use aptos_state_view::{StateView, StateViewId};
+use aptos_types::state_store::state_storage_usage::StateStorageUsage;
 use aptos_types::{
     access_path::AccessPath,
     on_chain_config::ConfigStorage,
@@ -26,7 +25,7 @@ use move_deps::{
         language_storage::{ModuleId, StructTag},
         resolver::{ModuleResolver, ResourceResolver},
     },
-    move_table_extension::{TableHandle, TableOperation, TableResolver},
+    move_table_extension::{TableHandle, TableResolver},
 };
 use std::{
     collections::btree_map::BTreeMap,
@@ -65,7 +64,7 @@ impl<'a, S: StateView> StateViewCache<'a, S> {
     // The effect is to build a layer in front of the `StateView` which keeps
     // track of the data as if the changes were applied immediately.
     pub(crate) fn push_write_set(&mut self, write_set: &WriteSet) {
-        for (ref ap, ref write_op) in write_set.iter() {
+        for (ap, write_op) in write_set.iter() {
             match write_op {
                 WriteOp::Modification(blob) | WriteOp::Creation(blob) => {
                     self.data_map.insert(ap.clone(), Some(blob.clone()));
@@ -123,9 +122,9 @@ impl<'block, S: StateView> StateView for StateViewCache<'block, S> {
 }
 
 // Adapter to convert a `StateView` into a `RemoteCache`.
-pub struct RemoteStorage<'a, S>(&'a S);
+pub struct StorageAdapter<'a, S>(&'a S);
 
-impl<'a, S: StateView> RemoteStorage<'a, S> {
+impl<'a, S: StateView> StorageAdapter<'a, S> {
     pub fn new(state_store: &'a S) -> Self {
         Self(state_store)
     }
@@ -137,7 +136,7 @@ impl<'a, S: StateView> RemoteStorage<'a, S> {
     }
 }
 
-impl<'a, S: StateView> ModuleResolver for RemoteStorage<'a, S> {
+impl<'a, S: StateView> ModuleResolver for StorageAdapter<'a, S> {
     type Error = VMError;
 
     fn get_module(&self, module_id: &ModuleId) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -147,7 +146,7 @@ impl<'a, S: StateView> ModuleResolver for RemoteStorage<'a, S> {
     }
 }
 
-impl<'a, S: StateView> ResourceResolver for RemoteStorage<'a, S> {
+impl<'a, S: StateView> ResourceResolver for StorageAdapter<'a, S> {
     type Error = VMError;
 
     fn get_resource(
@@ -160,7 +159,7 @@ impl<'a, S: StateView> ResourceResolver for RemoteStorage<'a, S> {
     }
 }
 
-impl<'a, S: StateView> TableResolver for RemoteStorage<'a, S> {
+impl<'a, S: StateView> TableResolver for StorageAdapter<'a, S> {
     fn resolve_table_entry(
         &self,
         handle: &TableHandle,
@@ -168,30 +167,21 @@ impl<'a, S: StateView> TableResolver for RemoteStorage<'a, S> {
     ) -> Result<Option<Vec<u8>>, Error> {
         self.get_state_value(&StateKey::table_item((*handle).into(), key.to_vec()))
     }
-
-    fn operation_cost(
-        &self,
-        _op: TableOperation,
-        _key_size: usize,
-        _val_size: usize,
-    ) -> InternalGas {
-        1.into()
-    }
 }
 
-impl<'a, S: StateView> ConfigStorage for RemoteStorage<'a, S> {
+impl<'a, S: StateView> ConfigStorage for StorageAdapter<'a, S> {
     fn fetch_config(&self, access_path: AccessPath) -> Option<Vec<u8>> {
         self.get(&access_path).ok()?
     }
 }
 
-impl<'a, S: StateView> StateStorageUsageResolver for RemoteStorage<'a, S> {
+impl<'a, S: StateView> StateStorageUsageResolver for StorageAdapter<'a, S> {
     fn get_state_storage_usage(&self) -> Result<StateStorageUsage, Error> {
         self.get_usage()
     }
 }
 
-impl<'a, S> Deref for RemoteStorage<'a, S> {
+impl<'a, S> Deref for StorageAdapter<'a, S> {
     type Target = S;
 
     fn deref(&self) -> &Self::Target {
@@ -200,20 +190,20 @@ impl<'a, S> Deref for RemoteStorage<'a, S> {
 }
 
 pub trait AsMoveResolver<S> {
-    fn as_move_resolver(&self) -> RemoteStorage<S>;
+    fn as_move_resolver(&self) -> StorageAdapter<S>;
 }
 
 impl<S: StateView> AsMoveResolver<S> for S {
-    fn as_move_resolver(&self) -> RemoteStorage<S> {
-        RemoteStorage::new(self)
+    fn as_move_resolver(&self) -> StorageAdapter<S> {
+        StorageAdapter::new(self)
     }
 }
 
-pub struct RemoteStorageOwned<S> {
+pub struct StorageAdapterOwned<S> {
     state_view: S,
 }
 
-impl<S> Deref for RemoteStorageOwned<S> {
+impl<S> Deref for StorageAdapterOwned<S> {
     type Target = S;
 
     fn deref(&self) -> &Self::Target {
@@ -221,13 +211,13 @@ impl<S> Deref for RemoteStorageOwned<S> {
     }
 }
 
-impl<S> DerefMut for RemoteStorageOwned<S> {
+impl<S> DerefMut for StorageAdapterOwned<S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.state_view
     }
 }
 
-impl<S: StateView> ModuleResolver for RemoteStorageOwned<S> {
+impl<S: StateView> ModuleResolver for StorageAdapterOwned<S> {
     type Error = VMError;
 
     fn get_module(&self, module_id: &ModuleId) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -235,7 +225,7 @@ impl<S: StateView> ModuleResolver for RemoteStorageOwned<S> {
     }
 }
 
-impl<S: StateView> ResourceResolver for RemoteStorageOwned<S> {
+impl<S: StateView> ResourceResolver for StorageAdapterOwned<S> {
     type Error = VMError;
 
     fn get_resource(
@@ -247,7 +237,7 @@ impl<S: StateView> ResourceResolver for RemoteStorageOwned<S> {
     }
 }
 
-impl<S: StateView> TableResolver for RemoteStorageOwned<S> {
+impl<S: StateView> TableResolver for StorageAdapterOwned<S> {
     fn resolve_table_entry(
         &self,
         handle: &TableHandle,
@@ -255,31 +245,26 @@ impl<S: StateView> TableResolver for RemoteStorageOwned<S> {
     ) -> Result<Option<Vec<u8>>, Error> {
         self.as_move_resolver().resolve_table_entry(handle, key)
     }
-
-    fn operation_cost(&self, op: TableOperation, key_size: usize, val_size: usize) -> InternalGas {
-        self.as_move_resolver()
-            .operation_cost(op, key_size, val_size)
-    }
 }
 
-impl<S: StateView> ConfigStorage for RemoteStorageOwned<S> {
+impl<S: StateView> ConfigStorage for StorageAdapterOwned<S> {
     fn fetch_config(&self, access_path: AccessPath) -> Option<Vec<u8>> {
         self.as_move_resolver().fetch_config(access_path)
     }
 }
 
-impl<S: StateView> StateStorageUsageResolver for RemoteStorageOwned<S> {
+impl<S: StateView> StateStorageUsageResolver for StorageAdapterOwned<S> {
     fn get_state_storage_usage(&self) -> Result<StateStorageUsage, anyhow::Error> {
         self.as_move_resolver().get_usage()
     }
 }
 
 pub trait IntoMoveResolver<S> {
-    fn into_move_resolver(self) -> RemoteStorageOwned<S>;
+    fn into_move_resolver(self) -> StorageAdapterOwned<S>;
 }
 
 impl<S: StateView> IntoMoveResolver<S> for S {
-    fn into_move_resolver(self) -> RemoteStorageOwned<S> {
-        RemoteStorageOwned { state_view: self }
+    fn into_move_resolver(self) -> StorageAdapterOwned<S> {
+        StorageAdapterOwned { state_view: self }
     }
 }

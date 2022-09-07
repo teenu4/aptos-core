@@ -7,6 +7,7 @@ use crate::{
     event::{EventHandle, EventKey},
 };
 use anyhow::Result;
+use aptos_crypto::HashValue;
 use move_deps::move_core_types::{
     ident_str,
     identifier::IdentStr,
@@ -30,6 +31,10 @@ pub struct NewBlockEvent {
 }
 
 impl NewBlockEvent {
+    pub fn hash(&self) -> Result<HashValue> {
+        Ok(HashValue::from_slice(self.hash.to_vec())?)
+    }
+
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -94,7 +99,7 @@ impl MoveStructType for NewBlockEvent {
 }
 
 pub fn new_block_event_key() -> EventKey {
-    EventKey::new(2, CORE_CODE_ADDRESS)
+    EventKey::new(3, CORE_CODE_ADDRESS)
 }
 
 /// The path to the new block event handle under a Block::BlockResource resource.
@@ -111,6 +116,7 @@ pub struct BlockResource {
     height: u64,
     epoch_interval: u64,
     new_block_events: EventHandle,
+    update_epoch_interval_events: EventHandle,
 }
 
 impl BlockResource {

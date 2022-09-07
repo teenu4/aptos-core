@@ -122,7 +122,7 @@ export class Script {
 export class EntryFunction {
   /**
    * Contains the payload to run a function within a module.
-   * @param module_name Fullly qualified module name. ModuleId consists of account address and module name.
+   * @param module_name Fully qualified module name. ModuleId consists of account address and module name.
    * @param function_name The function to run.
    * @param ty_args Type arguments that move function requires.
    *
@@ -220,23 +220,6 @@ export class Module {
   static deserialize(deserializer: Deserializer): Module {
     const code = deserializer.deserializeBytes();
     return new Module(code);
-  }
-}
-
-export class ModuleBundle {
-  /**
-   * Contains a list of Modules that can be published together.
-   * @param codes List of modules.
-   */
-  constructor(public readonly codes: Seq<Module>) {}
-
-  serialize(serializer: Serializer): void {
-    serializeVector<Module>(this.codes, serializer);
-  }
-
-  static deserialize(deserializer: Deserializer): ModuleBundle {
-    const codes = deserializeVector(deserializer, Module);
-    return new ModuleBundle(codes);
   }
 }
 
@@ -365,8 +348,7 @@ export abstract class TransactionPayload {
     switch (index) {
       case 0:
         return TransactionPayloadScript.load(deserializer);
-      case 1:
-        return TransactionPayloadModuleBundle.load(deserializer);
+      // TODO: change to 1 once ModuleBundle has been removed from rust
       case 2:
         return TransactionPayloadEntryFunction.load(deserializer);
       default:
@@ -388,22 +370,6 @@ export class TransactionPayloadScript extends TransactionPayload {
   static load(deserializer: Deserializer): TransactionPayloadScript {
     const value = Script.deserialize(deserializer);
     return new TransactionPayloadScript(value);
-  }
-}
-
-export class TransactionPayloadModuleBundle extends TransactionPayload {
-  constructor(public readonly value: ModuleBundle) {
-    super();
-  }
-
-  serialize(serializer: Serializer): void {
-    serializer.serializeU32AsUleb128(1);
-    this.value.serialize(serializer);
-  }
-
-  static load(deserializer: Deserializer): TransactionPayloadModuleBundle {
-    const value = ModuleBundle.deserialize(deserializer);
-    return new TransactionPayloadModuleBundle(value);
   }
 }
 
@@ -563,7 +529,7 @@ export abstract class Transaction {
 
   getHashSalt(): Bytes {
     const hash = SHA3.sha3_256.create();
-    hash.update(Buffer.from("APTOS::Transaction"));
+    hash.update("APTOS::Transaction");
     return new Uint8Array(hash.arrayBuffer());
   }
 

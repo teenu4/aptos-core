@@ -3,7 +3,7 @@
 
 use crate::logging::AdapterLogSchema;
 use aptos_logger::prelude::*;
-use aptos_types::account_config::ChainSpecificAccountInfo;
+use aptos_types::account_config::TransactionValidation;
 use move_deps::{
     move_binary_format::errors::VMError,
     move_core_types::vm_status::{StatusCode, VMStatus},
@@ -28,12 +28,10 @@ pub const ECANT_PAY_GAS_DEPOSIT: u64 = 1005;
 pub const ETRANSACTION_EXPIRED: u64 = 1006;
 // chain_id in transaction doesn't match the one on-chain.
 pub const EBAD_CHAIN_ID: u64 = 1007;
-// Invalid sender (not aptos root) for write set.
-pub const EINVALID_WRITESET_SENDER: u64 = 1008;
 // Transaction sequence number exceeds u64 max.
-pub const ESEQUENCE_NUMBER_TOO_BIG: u64 = 1009;
+pub const ESEQUENCE_NUMBER_TOO_BIG: u64 = 1008;
 // Counts of secondary keys and addresses don't match.
-pub const ESECONDARY_KEYS_ADDRESSES_COUNT_MISMATCH: u64 = 1010;
+pub const ESECONDARY_KEYS_ADDRESSES_COUNT_MISMATCH: u64 = 1009;
 
 const INVALID_ARGUMENT: u8 = 1;
 const LIMIT_EXCEEDED: u8 = 2;
@@ -48,7 +46,7 @@ fn error_split(code: u64) -> (u8, u64) {
 /// Any non-abort non-execution code is considered an invariant violation, specifically
 /// `UNEXPECTED_ERROR_FROM_KNOWN_MOVE_FUNCTION`
 pub fn convert_prologue_error(
-    chain_specific_info: &ChainSpecificAccountInfo,
+    transaction_validation: &TransactionValidation,
     error: VMError,
     log_context: &AdapterLogSchema,
 ) -> Result<(), VMStatus> {
@@ -56,7 +54,7 @@ pub fn convert_prologue_error(
     Err(match status {
         VMStatus::Executed => VMStatus::Executed,
         VMStatus::MoveAbort(location, code)
-            if !chain_specific_info.is_account_module_abort(&location) =>
+            if !transaction_validation.is_account_module_abort(&location) =>
         {
             let (category, reason) = error_split(code);
             log_context.alert();
@@ -85,7 +83,6 @@ pub fn convert_prologue_error(
                 }
                 (INVALID_ARGUMENT, ETRANSACTION_EXPIRED) => StatusCode::TRANSACTION_EXPIRED,
                 (INVALID_ARGUMENT, EBAD_CHAIN_ID) => StatusCode::BAD_CHAIN_ID,
-                (INVALID_ARGUMENT, EINVALID_WRITESET_SENDER) => StatusCode::REJECTED_WRITE_SET,
                 // Sequence number will overflow
                 (LIMIT_EXCEEDED, ESEQUENCE_NUMBER_TOO_BIG) => StatusCode::SEQUENCE_NUMBER_TOO_BIG,
                 (INVALID_ARGUMENT, ESECONDARY_KEYS_ADDRESSES_COUNT_MISMATCH) => {
@@ -120,7 +117,7 @@ pub fn convert_prologue_error(
 /// Any other errors are mapped to the invariant violation
 /// `UNEXPECTED_ERROR_FROM_KNOWN_MOVE_FUNCTION`
 pub fn convert_epilogue_error(
-    chain_specific_info: &ChainSpecificAccountInfo,
+    transaction_validation: &TransactionValidation,
     error: VMError,
     log_context: &AdapterLogSchema,
 ) -> Result<(), VMStatus> {
@@ -128,7 +125,7 @@ pub fn convert_epilogue_error(
     Err(match status {
         VMStatus::Executed => VMStatus::Executed,
         VMStatus::MoveAbort(location, code)
-            if !chain_specific_info.is_account_module_abort(&location) =>
+            if !transaction_validation.is_account_module_abort(&location) =>
         {
             let (category, reason) = error_split(code);
             log_context.alert();

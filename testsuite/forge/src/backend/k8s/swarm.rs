@@ -63,7 +63,7 @@ impl K8sSwarm {
         let key = load_root_key(root_key);
         let account_key = AccountKey::from_private_key(key);
         let address = aptos_sdk::types::account_config::aptos_test_root_address();
-        let sequence_number = query_sequence_numbers(&client, &[address])
+        let sequence_number = query_sequence_numbers(&client, [address].iter())
             .await
             .map_err(|e| {
                 format_err!(
@@ -256,7 +256,7 @@ impl Swarm for K8sSwarm {
         Ok(())
     }
 
-    async fn ensure_no_validator_restart(&mut self) -> Result<()> {
+    async fn ensure_no_validator_restart(&self) -> Result<()> {
         for validator in &self.validators {
             if let Err(e) = check_for_container_restart(
                 &self.kube_client,
@@ -271,7 +271,7 @@ impl Swarm for K8sSwarm {
         Ok(())
     }
 
-    async fn ensure_no_fullnode_restart(&mut self) -> Result<()> {
+    async fn ensure_no_fullnode_restart(&self) -> Result<()> {
         for fullnode in &self.fullnodes {
             if let Err(e) = check_for_container_restart(
                 &self.kube_client,
@@ -503,9 +503,10 @@ pub async fn nodes_healthcheck(nodes: Vec<&K8sNode>) -> Result<Vec<String>> {
                             node.name()
                         );
                     }
-                    Err(x) => {
-                        info!("Node {} unhealthy: {}", node.name(), &x);
-                        Err(x)
+                    Err(err) => {
+                        let err = anyhow::Error::from(err);
+                        info!("Node {} unhealthy: {}", node.name(), &err);
+                        Err(err)
                     }
                 }
             })

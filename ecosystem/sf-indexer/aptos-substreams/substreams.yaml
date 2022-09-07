@@ -1,10 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "aptos_substreams"
-  version: v0.0.1
-
-imports:
-  aptos: ./aptos-v0.0.1.spkg
+  version: v0.0.2
 
 binaries:
   default:
@@ -16,6 +13,6 @@ modules:
     kind: map
     initialBlock: 0
     inputs:
-      - source: sf.aptos.type.v1.Block
+      - source: aptos.extractor.v1.Block
     output:
       type: proto:aptos.block_output.v1.BlockOutput

@@ -6,21 +6,24 @@ sidebar_position: 10
 
 # Run on GCP
 
-:::note
+:::tip Set up GCP account and create a project
 
 This guide assumes you already have GCP account setup, and have created a new project for deploying Aptos node. If you are not familar with GCP (Google Cloud Platform), checkout this [Prerequisites section](https://aptos.dev/tutorials/run-a-fullnode-on-gcp#prerequisites) for GCP account setup.
-
 :::
 
-:::note IMPORTANT
+:::tip IMPORTANT: Before you proceed
 
 Install the below pre-requisites if have not done so:
 
-   * Aptos CLI 0.3.1: https://github.com/aptos-labs/aptos-core/blob/main/crates/aptos/README.md
+   * Aptos CLI 0.3.1: https://aptos.dev/cli-tools/aptos-cli-tool/install-aptos-cli
    * Terraform 1.2.4: https://www.terraform.io/downloads.html
    * Kubernetes CLI: https://kubernetes.io/docs/tasks/tools/
    * Google Cloud CLI: https://cloud.google.com/sdk/docs/install-sdk
 
+:::
+
+:::tip One validator node + one validator fullnode
+When you follow all the below instructions, you will run one validator node and one validator fullnode in the cluster. 
 :::
 
 1. Create a working directory for your configuration.

@@ -7,18 +7,20 @@ module aptos_framework::code {
 
     use aptos_framework::util;
     use aptos_framework::system_addresses;
+    use aptos_std::copyable_any::Any;
+    use std::option::Option;
 
     // ----------------------------------------------------------------------
     // Code Publishing
 
     /// The package registry at the given address.
-    struct PackageRegistry has key {
+    struct PackageRegistry has key, store, drop {
         /// Packages installed at this address.
         packages: vector<PackageMetadata>,
     }
 
     /// Metadata for a package. All byte blobs are represented as base64-of-gzipped-bytes
-    struct PackageMetadata has store, copy, drop {
+    struct PackageMetadata has store, drop {
         /// Name of this package.
         name: String,
         /// The upgrade policy of this package.
@@ -26,26 +28,35 @@ module aptos_framework::code {
         /// The numbers of times this module has been upgraded. Also serves as the on-chain version.
         /// This field will be automatically assigned on successful upgrade.
         upgrade_number: u64,
-        /// The BuildInfo, in the BuildInfo.yaml format.
-        build_info: String,
-        /// The package manifest, in the Move.toml format.
-        manifest: String,
+        /// The source digest of the sources in the package. This is constructed by first building the
+        /// sha256 of each individual source, than sorting them alphabetically, and sha256 them again.
+        source_digest: String,
+        /// The package manifest, in the Move.toml format. Gzipped text.
+        manifest: vector<u8>,
         /// The list of modules installed by this package.
         modules: vector<ModuleMetadata>,
-        /// Error map, in compressed BCS
-        error_map: String,
-        /// ABIs, in compressed BCS
-        abis: vector<String>
+        /// Holds PackageDeps.
+        deps: vector<PackageDep>,
+        /// For future extension
+        extension: Option<Any>
+    }
+
+    /// A dependency to a package published at address
+    struct PackageDep has store, drop, copy {
+        account: address,
+        package_name: String
     }
 
     /// Metadata about a module in a package.
-    struct ModuleMetadata has store, copy, drop {
+    struct ModuleMetadata has store, drop {
         /// Name of the module.
         name: String,
-        /// Source text, in compressed ascii.
-        source: String,
-        /// Source map, in compressed BCS.
-        source_map: String
+        /// Source text, gzipped String. Empty if not provided.
+        source: vector<u8>,
+        /// Source map, in compressed BCS. Empty if not provided.
+        source_map: vector<u8>,
+        /// For future extensions.
+        extension: Option<Any>,
     }
 
     /// Describes an upgrade policy
@@ -65,11 +76,20 @@ module aptos_framework::code {
     /// Cannot delete a module that was published in the same package
     const EMODULE_MISSING: u64 = 0x4;
 
+    /// Dependency could not be resolved to any published package.
+    const EPACKAGE_DEP_MISSING: u64 = 0x5;
+
+    /// A dependency cannot have a weaker upgrade policy.
+    const EDEP_WEAKER_POLICY: u64 = 0x6;
+
+    /// A dependency to an `arbitrary` package must be on the same address.
+    const EDEP_ARBITRARY_NOT_SAME_ADDRESS: u64 = 0x7;
+
     /// Whether unconditional code upgrade with no compatibility check is allowed. This
     /// publication mode should only be used for modules which aren't shared with user others.
     /// The developer is responsible for not breaking memory layout of any resources he already
     /// stored on chain.
-    public fun upgrade_policy_no_compat(): UpgradePolicy {
+    public fun upgrade_policy_arbitrary(): UpgradePolicy {
         UpgradePolicy{policy: 0}
     }
 
@@ -110,7 +130,10 @@ module aptos_framework::code {
             move_to(owner, PackageRegistry{packages: vector::empty()})
         };
 
-        // Check package
+        // Checks for valid dependencies to other packages
+        check_dependencies(addr, &pack);
+
+        // Check package against conflicts
         let module_names = get_module_names(&pack);
         let packages = &mut borrow_global_mut<PackageRegistry>(addr).packages;
         let len = vector::length(packages);
@@ -133,6 +156,7 @@ module aptos_framework::code {
         *&mut pack.upgrade_number = upgrade_number;
 
         // Update registry
+        let policy = pack.upgrade_policy;
         if (index < len) {
             *vector::borrow_mut(packages, index) = pack
         } else {
@@ -140,14 +164,14 @@ module aptos_framework::code {
         };
 
         // Request publish
-        request_publish(addr, module_names, code, pack.upgrade_policy.policy)
+        request_publish(addr, module_names, code, policy.policy)
     }
 
     /// Same as `publish_package` but as an entry function which can be called as a transaction. Because
     /// of current restrictions for txn parameters, the metadata needs to be passed in serialized form.
-    public entry fun publish_package_txn(owner: &signer, pack_serialized: vector<u8>, code: vector<vector<u8>>)
+    public entry fun publish_package_txn(owner: &signer, metadata_serialized: vector<u8>, code: vector<vector<u8>>)
     acquires PackageRegistry {
-        publish_package(owner, util::from_bytes<PackageMetadata>(pack_serialized), code)
+        publish_package(owner, util::from_bytes<PackageMetadata>(metadata_serialized), code)
     }
 
     // Helpers
@@ -185,6 +209,54 @@ module aptos_framework::code {
             };
             i = i + 1;
         }
+    }
+
+    /// Check that the upgrade policies of all packages are equal or higher quality than this package.
+    fun check_dependencies(publish_address: address, pack: &PackageMetadata) acquires PackageRegistry {
+        let deps = &pack.deps;
+        let i = 0;
+        let n = vector::length(deps);
+        while (i < n) {
+            let dep = vector::borrow(deps, i);
+            assert!(exists<PackageRegistry>(dep.account), error::not_found(EPACKAGE_DEP_MISSING));
+            if (is_policy_exempted_address(dep.account)) {
+                i = i + 1;
+                continue
+            };
+            let registry = borrow_global<PackageRegistry>(dep.account);
+            let j = 0;
+            let m = vector::length(&registry.packages);
+            let found = false;
+            while (j < m) {
+                let dep_pack = vector::borrow(&registry.packages, j);
+                if (dep_pack.name == dep.package_name) {
+                    // Found the package in the registry, now check policy
+                    assert!(
+                        dep_pack.upgrade_policy.policy >= pack.upgrade_policy.policy,
+                        error::invalid_argument(EDEP_WEAKER_POLICY)
+                    );
+                    if (dep_pack.upgrade_policy == upgrade_policy_arbitrary()) {
+                        assert!(
+                            dep.account == publish_address,
+                            error::invalid_argument(EDEP_ARBITRARY_NOT_SAME_ADDRESS)
+                        )
+                    };
+                    found = true;
+                    break
+                };
+                j = j + 1;
+            };
+            assert!(found, error::not_found(EPACKAGE_DEP_MISSING));
+            i = i + 1;
+        };
+    }
+
+    /// Core addresses which are exempted from the check that their policy matches the referring package. Without
+    /// this exemption, it would not be possible to define an immutable package based on the core system, which
+    /// requires to be upgradable for maintenance and evolution, and is configured to be `compatible`.
+    fun is_policy_exempted_address(addr: address): bool {
+        addr == @1 || addr == @2 || addr == @3 || addr == @4 || addr == @5 ||
+        addr == @6 || addr == @7 || addr == @8 || addr == @9 || addr == @10
     }
 
     /// Get the names of the modules in a package.

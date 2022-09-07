@@ -5,8 +5,8 @@ pub mod aptos;
 pub mod error;
 pub mod faucet;
 
+use aptos_api_types::TransactionsBatchSubmissionResult;
 pub use faucet::FaucetClient;
-use std::collections::BTreeMap;
 pub mod response;
 pub use response::Response;
 pub mod state;
@@ -19,12 +19,13 @@ pub use state::State;
 pub use types::{Account, Resource};
 
 use crate::aptos::{AptosVersion, Balance};
+use crate::error::RestError;
 use anyhow::{anyhow, Result};
 use aptos_api_types::mime_types::BCS;
 use aptos_api_types::{
     mime_types::BCS_SIGNED_TRANSACTION as BCS_CONTENT_TYPE, AptosError, BcsBlock, Block,
-    HexEncodedBytes, MoveModuleId, TransactionData, TransactionOnChainData, UserTransaction,
-    VersionedEvent,
+    GasEstimation, HexEncodedBytes, MoveModuleId, TransactionData, TransactionOnChainData,
+    UserTransaction, VersionedEvent,
 };
 use aptos_crypto::HashValue;
 use aptos_types::account_config::AccountResource;
@@ -36,17 +37,25 @@ use aptos_types::{
     transaction::SignedTransaction,
 };
 use move_deps::move_core_types::language_storage::StructTag;
-use poem_openapi::types::ParseFromJSON;
 use reqwest::header::ACCEPT;
 use reqwest::{header::CONTENT_TYPE, Client as ReqwestClient, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::future::Future;
 use std::time::Duration;
+use tokio::time::Instant;
 use types::{deserialize_from_prefixed_hex_string, deserialize_from_string};
 use url::Url;
 
 pub const USER_AGENT: &str = concat!("aptos-client-sdk-rust / ", env!("CARGO_PKG_VERSION"));
 pub const DEFAULT_VERSION_PATH_BASE: &str = "v1/";
+const DEFAULT_MAX_WAIT_MS: u64 = 60000;
+const DEFAULT_INTERVAL_MS: u64 = 1000;
+static DEFAULT_MAX_WAIT_DURATION: Duration = Duration::from_millis(DEFAULT_MAX_WAIT_MS);
+static DEFAULT_INTERVAL_DURATION: Duration = Duration::from_millis(DEFAULT_INTERVAL_MS);
+
+type AptosResult<T> = Result<T, RestError>;
 
 #[derive(Clone, Debug)]
 pub struct Client {
@@ -56,9 +65,9 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(base_url: Url) -> Self {
+    pub fn new_with_timeout(base_url: Url, timeout: Duration) -> Self {
         let inner = ReqwestClient::builder()
-            .timeout(Duration::from_secs(10))
+            .timeout(timeout)
             .user_agent(USER_AGENT)
             .cookie_store(true)
             .build()
@@ -85,21 +94,32 @@ impl Client {
         }
     }
 
+    pub fn new(base_url: Url) -> Self {
+        Self::new_with_timeout(base_url, Duration::from_secs(10))
+    }
+
+    pub fn path_prefix_string(&self) -> String {
+        self.base_url
+            .join(&self.version_path_base)
+            .map(|path| path.to_string())
+            .unwrap_or_else(|_| "<bad_base_url>".to_string())
+    }
+
     /// Set a different version path base, e.g. "v1/" See
     /// DEFAULT_VERSION_PATH_BASE for the default value.
-    pub fn version_path_base(mut self, version_path_base: String) -> Result<Self> {
+    pub fn version_path_base(mut self, version_path_base: String) -> AptosResult<Self> {
         if !version_path_base.ends_with('/') {
-            return Err(anyhow!("version_path_base must end with '/', e.g. 'v1/'"));
+            return Err(anyhow!("version_path_base must end with '/', e.g. 'v1/'").into());
         }
         self.version_path_base = version_path_base;
         Ok(self)
     }
 
-    fn build_path(&self, path: &str) -> Result<Url> {
+    fn build_path(&self, path: &str) -> AptosResult<Url> {
         Ok(self.base_url.join(&self.version_path_base)?.join(path)?)
     }
 
-    pub async fn get_aptos_version(&self) -> Result<Response<AptosVersion>> {
+    pub async fn get_aptos_version(&self) -> AptosResult<Response<AptosVersion>> {
         self.get_resource::<AptosVersion>(CORE_CODE_ADDRESS, "0x1::version::Version")
             .await
     }
@@ -108,7 +128,7 @@ impl Client {
         &self,
         height: u64,
         with_transactions: bool,
-    ) -> Result<Response<Block>> {
+    ) -> AptosResult<Response<Block>> {
         self.get(self.build_path(&format!(
             "blocks/by_height/{}?with_transactions={}",
             height, with_transactions
@@ -120,7 +140,7 @@ impl Client {
         &self,
         height: u64,
         with_transactions: bool,
-    ) -> Result<Response<BcsBlock>> {
+    ) -> AptosResult<Response<BcsBlock>> {
         let url = self.build_path(&format!(
             "blocks/by_height/{}?with_transactions={}",
             height, with_transactions
@@ -133,7 +153,7 @@ impl Client {
         &self,
         version: u64,
         with_transactions: bool,
-    ) -> Result<Response<Block>> {
+    ) -> AptosResult<Response<Block>> {
         self.get(self.build_path(&format!(
             "blocks/by_version/{}?with_transactions={}",
             version, with_transactions
@@ -145,7 +165,7 @@ impl Client {
         &self,
         height: u64,
         with_transactions: bool,
-    ) -> Result<Response<BcsBlock>> {
+    ) -> AptosResult<Response<BcsBlock>> {
         let url = self.build_path(&format!(
             "blocks/by_version/{}?with_transactions={}",
             height, with_transactions
@@ -154,7 +174,10 @@ impl Client {
         Ok(response.and_then(|inner| bcs::from_bytes(&inner))?)
     }
 
-    pub async fn get_account_balance(&self, address: AccountAddress) -> Result<Response<Balance>> {
+    pub async fn get_account_balance(
+        &self,
+        address: AccountAddress,
+    ) -> AptosResult<Response<Balance>> {
         let resp = self
             .get_account_resource(address, "0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>")
             .await?;
@@ -162,7 +185,7 @@ impl Client {
             if let Some(res) = resource {
                 Ok(serde_json::from_value::<Balance>(res.data)?)
             } else {
-                Err(anyhow!("No data returned"))
+                Err(anyhow!("No data returned").into())
             }
         })
     }
@@ -171,7 +194,7 @@ impl Client {
         &self,
         address: AccountAddress,
         version: u64,
-    ) -> Result<Response<Balance>> {
+    ) -> AptosResult<Response<Balance>> {
         let resp = self
             .get_account_resource_at_version(
                 address,
@@ -183,16 +206,16 @@ impl Client {
             if let Some(res) = resource {
                 Ok(serde_json::from_value::<Balance>(res.data)?)
             } else {
-                Err(anyhow!("No data returned"))
+                Err(anyhow!("No data returned").into())
             }
         })
     }
 
-    pub async fn get_index(&self) -> Result<Response<IndexResponse>> {
+    pub async fn get_index(&self) -> AptosResult<Response<IndexResponse>> {
         self.get(self.build_path("")?).await
     }
 
-    pub async fn get_ledger_information(&self) -> Result<Response<State>> {
+    pub async fn get_ledger_information(&self) -> AptosResult<Response<State>> {
         let response = self.get_index().await?.map(|r| State {
             chain_id: r.chain_id,
             epoch: r.epoch.into(),
@@ -202,6 +225,10 @@ impl Client {
             oldest_block_height: r.oldest_block_height.into(),
             block_height: r.block_height.into(),
         });
+        assert_eq!(response.inner().chain_id, response.state().chain_id);
+        assert_eq!(response.inner().epoch, response.state().epoch);
+        assert_eq!(response.inner().version, response.state().version);
+        assert_eq!(response.inner().block_height, response.state().block_height);
 
         Ok(response)
     }
@@ -209,7 +236,7 @@ impl Client {
     pub async fn simulate(
         &self,
         txn: &SignedTransaction,
-    ) -> Result<Response<Vec<UserTransaction>>> {
+    ) -> AptosResult<Response<Vec<UserTransaction>>> {
         let txn_payload = bcs::to_bytes(txn)?;
         let url = self.build_path("transactions/simulate")?;
 
@@ -227,7 +254,7 @@ impl Client {
     pub async fn simulate_bcs(
         &self,
         txn: &SignedTransaction,
-    ) -> Result<Response<TransactionOnChainData>> {
+    ) -> AptosResult<Response<TransactionOnChainData>> {
         let txn_payload = bcs::to_bytes(txn)?;
         let url = self.build_path("transactions/simulate")?;
 
@@ -244,7 +271,10 @@ impl Client {
         Ok(response.and_then(|bytes| bcs::from_bytes(&bytes))?)
     }
 
-    pub async fn submit(&self, txn: &SignedTransaction) -> Result<Response<PendingTransaction>> {
+    pub async fn submit(
+        &self,
+        txn: &SignedTransaction,
+    ) -> AptosResult<Response<PendingTransaction>> {
         let txn_payload = bcs::to_bytes(txn)?;
         let url = self.build_path("transactions")?;
 
@@ -259,7 +289,7 @@ impl Client {
         self.json(response).await
     }
 
-    pub async fn submit_bcs(&self, txn: &SignedTransaction) -> Result<Response<()>> {
+    pub async fn submit_bcs(&self, txn: &SignedTransaction) -> AptosResult<Response<()>> {
         let txn_payload = bcs::to_bytes(txn)?;
         let url = self.build_path("transactions")?;
 
@@ -276,7 +306,46 @@ impl Client {
         Ok(response.and_then(|bytes| bcs::from_bytes(&bytes))?)
     }
 
-    pub async fn submit_and_wait(&self, txn: &SignedTransaction) -> Result<Response<Transaction>> {
+    pub async fn submit_batch(
+        &self,
+        txns: &[SignedTransaction],
+    ) -> AptosResult<Response<TransactionsBatchSubmissionResult>> {
+        let txn_payload = bcs::to_bytes(&txns.to_vec())?;
+        let url = self.build_path("transactions/batch")?;
+
+        let response = self
+            .inner
+            .post(url)
+            .header(CONTENT_TYPE, BCS_CONTENT_TYPE)
+            .body(txn_payload)
+            .send()
+            .await?;
+        self.json(response).await
+    }
+    pub async fn submit_batch_bcs(
+        &self,
+        txns: &[SignedTransaction],
+    ) -> AptosResult<Response<TransactionsBatchSubmissionResult>> {
+        let txn_payload = bcs::to_bytes(&txns.to_vec())?;
+        let url = self.build_path("transactions/batch")?;
+
+        let response = self
+            .inner
+            .post(url)
+            .header(CONTENT_TYPE, BCS_CONTENT_TYPE)
+            .header(ACCEPT, BCS)
+            .body(txn_payload)
+            .send()
+            .await?;
+
+        let response = self.check_and_parse_bcs_response(response).await?;
+        Ok(response.and_then(|bytes| bcs::from_bytes(&bytes)).unwrap())
+    }
+
+    pub async fn submit_and_wait(
+        &self,
+        txn: &SignedTransaction,
+    ) -> AptosResult<Response<Transaction>> {
         self.submit(txn).await?;
         self.wait_for_signed_transaction(txn).await
     }
@@ -284,17 +353,30 @@ impl Client {
     pub async fn submit_and_wait_bcs(
         &self,
         txn: &SignedTransaction,
-    ) -> Result<Response<TransactionOnChainData>, (Option<Response<TransactionData>>, anyhow::Error)>
-    {
-        self.submit_bcs(txn).await.map_err(|err| (None, err))?;
+    ) -> AptosResult<Response<TransactionOnChainData>> {
+        self.submit_bcs(txn).await?;
         self.wait_for_signed_transaction_bcs(txn).await
     }
 
     pub async fn wait_for_transaction(
         &self,
         pending_transaction: &PendingTransaction,
-    ) -> Result<Response<Transaction>> {
+    ) -> AptosResult<Response<Transaction>> {
         self.wait_for_transaction_by_hash(
+            pending_transaction.hash.into(),
+            *pending_transaction
+                .request
+                .expiration_timestamp_secs
+                .inner(),
+        )
+        .await
+    }
+
+    pub async fn wait_for_transaction_bcs(
+        &self,
+        pending_transaction: &PendingTransaction,
+    ) -> AptosResult<Response<TransactionOnChainData>> {
+        self.wait_for_transaction_by_hash_bcs(
             pending_transaction.hash.into(),
             *pending_transaction
                 .request
@@ -307,7 +389,7 @@ impl Client {
     pub async fn wait_for_signed_transaction(
         &self,
         transaction: &SignedTransaction,
-    ) -> Result<Response<Transaction>> {
+    ) -> AptosResult<Response<Transaction>> {
         let expiration_timestamp = transaction.expiration_timestamp_secs();
         self.wait_for_transaction_by_hash(
             transaction.clone().committed_hash(),
@@ -319,8 +401,7 @@ impl Client {
     pub async fn wait_for_signed_transaction_bcs(
         &self,
         transaction: &SignedTransaction,
-    ) -> Result<Response<TransactionOnChainData>, (Option<Response<TransactionData>>, anyhow::Error)>
-    {
+    ) -> AptosResult<Response<TransactionOnChainData>> {
         let expiration_timestamp = transaction.expiration_timestamp_secs();
         self.wait_for_transaction_by_hash_bcs(
             transaction.clone().committed_hash(),
@@ -333,7 +414,7 @@ impl Client {
         &self,
         hash: HashValue,
         expiration_timestamp_secs: u64,
-    ) -> Result<Response<Transaction>> {
+    ) -> AptosResult<Response<Transaction>> {
         const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
         const DEFAULT_DELAY: Duration = Duration::from_millis(500);
 
@@ -349,46 +430,37 @@ impl Client {
                         return Err(anyhow!(
                             "transaction execution failed: {}",
                             transaction.vm_status()
-                        ));
+                        ))?;
                     }
                     return Ok(Response::new(transaction, state));
                 }
                 if expiration_timestamp_secs <= state.timestamp_usecs / 1_000_000 {
-                    return Err(anyhow!("transaction expired"));
+                    return Err(anyhow!("transaction expired").into());
                 }
             }
 
             tokio::time::sleep(DEFAULT_DELAY).await;
         }
 
-        Err(anyhow!("timeout"))
+        Err(anyhow!("timeout").into())
     }
 
     pub async fn wait_for_transaction_by_hash_bcs(
         &self,
         hash: HashValue,
         expiration_timestamp_secs: u64,
-    ) -> Result<Response<TransactionOnChainData>, (Option<Response<TransactionData>>, anyhow::Error)>
-    {
+    ) -> AptosResult<Response<TransactionOnChainData>> {
         const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
         const DEFAULT_DELAY: Duration = Duration::from_millis(500);
 
         let start = std::time::Instant::now();
         while start.elapsed() < DEFAULT_TIMEOUT {
-            let resp = self
-                .get_transaction_by_hash_bcs_inner(hash)
-                .await
-                .map_err(|err| (None, err))?;
+            let resp = self.get_transaction_by_hash_bcs_inner(hash).await?;
 
             // If it's not found, keep waiting for it
             if resp.status() != StatusCode::NOT_FOUND {
-                let resp = self
-                    .check_and_parse_bcs_response(resp)
-                    .await
-                    .map_err(|err| (None, err))?;
-                let resp = resp
-                    .and_then(|bytes| bcs::from_bytes(&bytes))
-                    .map_err(|err| (None, err.into()))?;
+                let resp = self.check_and_parse_bcs_response(resp).await?;
+                let resp = resp.and_then(|bytes| bcs::from_bytes(&bytes))?;
                 let (maybe_pending_txn, state) = resp.into_parts();
 
                 // If we have a committed transaction, determine if it failed or not
@@ -398,10 +470,7 @@ impl Client {
                     // The user can handle the error
                     return match status {
                         ExecutionStatus::Success => Ok(Response::new(txn, state)),
-                        _ => Err((
-                            Some(Response::new(TransactionData::OnChain(txn), state)),
-                            anyhow!("Transaction failed"),
-                        )),
+                        _ => Err(anyhow!("Transaction failed").into()),
                     };
                 }
 
@@ -409,24 +478,44 @@ impl Client {
                 if Duration::from_secs(expiration_timestamp_secs)
                     <= Duration::from_micros(state.timestamp_usecs)
                 {
-                    return Err((
-                        Some(Response::new(maybe_pending_txn, state)),
-                        anyhow!("Transaction expired"),
-                    ));
+                    return Err(anyhow!("Transaction expired").into());
                 }
             }
 
             tokio::time::sleep(DEFAULT_DELAY).await;
         }
 
-        return Err((None, anyhow!("Timed out waiting for transaction")));
+        Err(anyhow!("Timed out waiting for transaction").into())
+    }
+
+    pub async fn wait_for_version(&self, version: u64) -> Result<State> {
+        const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+        const DEFAULT_DELAY: Duration = Duration::from_millis(500);
+
+        let start = std::time::Instant::now();
+        loop {
+            let state = self.get_ledger_information().await?.into_inner();
+            if state.version >= version {
+                return Ok(state);
+            }
+
+            if start.elapsed() >= DEFAULT_TIMEOUT {
+                return Err(anyhow!(
+                    "timeout when waiting for version {}, only got to {}",
+                    version,
+                    state.version
+                ));
+            }
+
+            tokio::time::sleep(DEFAULT_DELAY).await;
+        }
     }
 
     pub async fn get_transactions(
         &self,
         start: Option<u64>,
         limit: Option<u16>,
-    ) -> Result<Response<Vec<Transaction>>> {
+    ) -> AptosResult<Response<Vec<Transaction>>> {
         let url = self.build_path("transactions")?;
 
         let mut request = self.inner.get(url);
@@ -447,13 +536,16 @@ impl Client {
         &self,
         start: Option<u64>,
         limit: Option<u16>,
-    ) -> Result<Response<Vec<TransactionOnChainData>>> {
+    ) -> AptosResult<Response<Vec<TransactionOnChainData>>> {
         let url = self.build_path("transactions")?;
         let response = self.get_bcs_with_page(url, start, limit).await?;
         Ok(response.and_then(|inner| bcs::from_bytes(&inner))?)
     }
 
-    pub async fn get_transaction_by_hash(&self, hash: HashValue) -> Result<Response<Transaction>> {
+    pub async fn get_transaction_by_hash(
+        &self,
+        hash: HashValue,
+    ) -> AptosResult<Response<Transaction>> {
         self.json(self.get_transaction_by_hash_inner(hash).await?)
             .await
     }
@@ -461,7 +553,7 @@ impl Client {
     pub async fn get_transaction_by_hash_bcs(
         &self,
         hash: HashValue,
-    ) -> Result<Response<TransactionData>> {
+    ) -> AptosResult<Response<TransactionData>> {
         let response = self.get_transaction_by_hash_bcs_inner(hash).await?;
         let response = self.check_and_parse_bcs_response(response).await?;
         Ok(response.and_then(|inner| bcs::from_bytes(&inner))?)
@@ -470,18 +562,24 @@ impl Client {
     pub async fn get_transaction_by_hash_bcs_inner(
         &self,
         hash: HashValue,
-    ) -> Result<reqwest::Response> {
+    ) -> AptosResult<reqwest::Response> {
         let url = self.build_path(&format!("transactions/by_hash/{}", hash.to_hex_literal()))?;
         let response = self.inner.get(url).header(ACCEPT, BCS).send().await?;
         Ok(response)
     }
 
-    async fn get_transaction_by_hash_inner(&self, hash: HashValue) -> Result<reqwest::Response> {
+    async fn get_transaction_by_hash_inner(
+        &self,
+        hash: HashValue,
+    ) -> AptosResult<reqwest::Response> {
         let url = self.build_path(&format!("transactions/by_hash/{}", hash.to_hex_literal()))?;
         Ok(self.inner.get(url).send().await?)
     }
 
-    pub async fn get_transaction_by_version(&self, version: u64) -> Result<Response<Transaction>> {
+    pub async fn get_transaction_by_version(
+        &self,
+        version: u64,
+    ) -> AptosResult<Response<Transaction>> {
         self.json(self.get_transaction_by_version_inner(version).await?)
             .await
     }
@@ -489,13 +587,16 @@ impl Client {
     pub async fn get_transaction_by_version_bcs(
         &self,
         version: u64,
-    ) -> Result<Response<TransactionData>> {
+    ) -> AptosResult<Response<TransactionData>> {
         let url = self.build_path(&format!("transactions/by_version/{}", version))?;
         let response = self.get_bcs(url).await?;
         Ok(response.and_then(|inner| bcs::from_bytes(&inner))?)
     }
 
-    async fn get_transaction_by_version_inner(&self, version: u64) -> Result<reqwest::Response> {
+    async fn get_transaction_by_version_inner(
+        &self,
+        version: u64,
+    ) -> AptosResult<reqwest::Response> {
         let url = self.build_path(&format!("transactions/by_version/{}", version))?;
         Ok(self.inner.get(url).send().await?)
     }
@@ -505,7 +606,7 @@ impl Client {
         address: AccountAddress,
         start: Option<u64>,
         limit: Option<u64>,
-    ) -> Result<Response<Vec<Transaction>>> {
+    ) -> AptosResult<Response<Vec<Transaction>>> {
         let url = self.build_path(&format!("accounts/{}/transactions", address))?;
 
         let mut request = self.inner.get(url);
@@ -527,7 +628,7 @@ impl Client {
         address: AccountAddress,
         start: Option<u64>,
         limit: Option<u16>,
-    ) -> Result<Response<Vec<TransactionOnChainData>>> {
+    ) -> AptosResult<Response<Vec<TransactionOnChainData>>> {
         let url = self.build_path(&format!("accounts/{}/transactions", address))?;
         let response = self.get_bcs_with_page(url, start, limit).await?;
         Ok(response.and_then(|inner| bcs::from_bytes(&inner))?)
@@ -536,7 +637,7 @@ impl Client {
     pub async fn get_account_resources(
         &self,
         address: AccountAddress,
-    ) -> Result<Response<Vec<Resource>>> {
+    ) -> AptosResult<Response<Vec<Resource>>> {
         let url = self.build_path(&format!("accounts/{}/resources", address))?;
 
         let response = self.inner.get(url).send().await?;
@@ -547,7 +648,7 @@ impl Client {
     pub async fn get_account_resources_bcs(
         &self,
         address: AccountAddress,
-    ) -> Result<Response<BTreeMap<StructTag, Vec<u8>>>> {
+    ) -> AptosResult<Response<BTreeMap<StructTag, Vec<u8>>>> {
         let url = self.build_path(&format!("accounts/{}/resources", address))?;
         let response = self.get_bcs(url).await?;
         Ok(response.and_then(|inner| bcs::from_bytes(&inner))?)
@@ -557,7 +658,7 @@ impl Client {
         &self,
         address: AccountAddress,
         version: u64,
-    ) -> Result<Response<Vec<Resource>>> {
+    ) -> AptosResult<Response<Vec<Resource>>> {
         let url = self.build_path(&format!(
             "accounts/{}/resources?ledger_version={}",
             address, version
@@ -572,18 +673,19 @@ impl Client {
         &self,
         address: AccountAddress,
         resource_type: &str,
-    ) -> Result<Response<T>> {
+    ) -> AptosResult<Response<T>> {
         let resp = self.get_account_resource(address, resource_type).await?;
         resp.and_then(|conf| {
             if let Some(res) = conf {
                 serde_json::from_value(res.data)
-                    .map_err(|e| anyhow!("deserialize {} failed: {}", resource_type, e))
+                    .map_err(|e| anyhow!("deserialize {} failed: {}", resource_type, e).into())
             } else {
                 Err(anyhow!(
                     "could not find resource {} in account {}",
                     resource_type,
                     address
-                ))
+                )
+                .into())
             }
         })
     }
@@ -592,10 +694,15 @@ impl Client {
         &self,
         address: AccountAddress,
         resource_type: &str,
-    ) -> Result<Response<Option<Resource>>> {
+    ) -> AptosResult<Response<Option<Resource>>> {
         let url = self.build_path(&format!("accounts/{}/resource/{}", address, resource_type))?;
 
-        let response = self.inner.get(url).send().await?;
+        let response = self
+            .inner
+            .get(url)
+            .send()
+            .await
+            .map_err(anyhow::Error::from)?;
         self.json(response).await
     }
 
@@ -603,7 +710,7 @@ impl Client {
         &self,
         address: AccountAddress,
         resource_type: &str,
-    ) -> Result<Response<T>> {
+    ) -> AptosResult<Response<T>> {
         let url = self.build_path(&format!("accounts/{}/resource/{}", address, resource_type))?;
         let response = self.get_bcs(url).await?;
         Ok(response.and_then(|inner| bcs::from_bytes(&inner))?)
@@ -614,7 +721,7 @@ impl Client {
         address: AccountAddress,
         resource_type: &str,
         version: u64,
-    ) -> Result<Response<Option<Resource>>> {
+    ) -> AptosResult<Response<Option<Resource>>> {
         let url = self.build_path(&format!(
             "accounts/{}/resource/{}?ledger_version={}",
             address, resource_type, version
@@ -627,7 +734,7 @@ impl Client {
     pub async fn get_account_modules(
         &self,
         address: AccountAddress,
-    ) -> Result<Response<Vec<MoveModuleBytecode>>> {
+    ) -> AptosResult<Response<Vec<MoveModuleBytecode>>> {
         let url = self.build_path(&format!("accounts/{}/modules", address))?;
 
         let response = self.inner.get(url).send().await?;
@@ -637,7 +744,7 @@ impl Client {
     pub async fn get_account_modules_bcs(
         &self,
         address: AccountAddress,
-    ) -> Result<Response<BTreeMap<MoveModuleId, Vec<u8>>>> {
+    ) -> AptosResult<Response<BTreeMap<MoveModuleId, Vec<u8>>>> {
         let url = self.build_path(&format!("accounts/{}/modules", address))?;
         let response = self.get_bcs(url).await?;
         Ok(response.and_then(|inner| bcs::from_bytes(&inner))?)
@@ -647,7 +754,7 @@ impl Client {
         &self,
         address: AccountAddress,
         module_name: &str,
-    ) -> Result<Response<MoveModuleBytecode>> {
+    ) -> AptosResult<Response<MoveModuleBytecode>> {
         let url = self.build_path(&format!("accounts/{}/module/{}", address, module_name))?;
         self.get(url).await
     }
@@ -656,7 +763,7 @@ impl Client {
         &self,
         address: AccountAddress,
         module_name: &str,
-    ) -> Result<Response<bytes::Bytes>> {
+    ) -> AptosResult<Response<bytes::Bytes>> {
         let url = self.build_path(&format!("accounts/{}/module/{}", address, module_name))?;
         self.get_bcs(url).await
     }
@@ -668,7 +775,7 @@ impl Client {
         field_name: &str,
         start: Option<u64>,
         limit: Option<u16>,
-    ) -> Result<Response<Vec<VersionedEvent>>> {
+    ) -> AptosResult<Response<Vec<VersionedEvent>>> {
         let url = self.build_path(&format!(
             "accounts/{}/events/{}/{}",
             address.to_hex_literal(),
@@ -695,7 +802,7 @@ impl Client {
         field_name: &str,
         start: Option<u64>,
         limit: Option<u16>,
-    ) -> Result<Response<Vec<EventWithVersion>>> {
+    ) -> AptosResult<Response<Vec<EventWithVersion>>> {
         let url = self.build_path(&format!(
             "accounts/{}/events/{}/{}",
             address.to_hex_literal(),
@@ -748,6 +855,7 @@ impl Client {
                     serde_json::from_value::<NewBlockEventResponse>(event.data)
                         .map_err(|e| anyhow!(e))
                         .and_then(|e| {
+                            assert_eq!(e.height, sequence_number);
                             Ok(VersionedNewBlockEvent {
                                 event: NewBlockEvent::new(
                                     AccountAddress::from_hex_literal(&e.hash)
@@ -780,7 +888,7 @@ impl Client {
         key_type: &str,
         value_type: &str,
         key: K,
-    ) -> Result<Response<Value>> {
+    ) -> AptosResult<Response<Value>> {
         let url = self.build_path(&format!("tables/{}/item", table_handle))?;
         let data = json!({
             "key_type": key_type,
@@ -792,7 +900,7 @@ impl Client {
         self.json(response).await
     }
 
-    pub async fn get_account(&self, address: AccountAddress) -> Result<Response<Account>> {
+    pub async fn get_account(&self, address: AccountAddress) -> AptosResult<Response<Account>> {
         let url = self.build_path(&format!("accounts/{}", address))?;
         let response = self.inner.get(url).send().await?;
         self.json(response).await
@@ -801,13 +909,19 @@ impl Client {
     pub async fn get_account_bcs(
         &self,
         address: AccountAddress,
-    ) -> Result<Response<AccountResource>> {
+    ) -> AptosResult<Response<AccountResource>> {
         let url = self.build_path(&format!("accounts/{}", address))?;
         let response = self.get_bcs(url).await?;
         Ok(response.and_then(|inner| bcs::from_bytes(&inner))?)
     }
 
-    pub async fn set_failpoint(&self, name: String, actions: String) -> Result<String> {
+    pub async fn estimate_gas_price(&self) -> AptosResult<Response<GasEstimation>> {
+        let url = self.build_path("estimate_gas_price")?;
+        let response = self.get_bcs(url).await?;
+        Ok(response.and_then(|inner| bcs::from_bytes(&inner))?)
+    }
+
+    pub async fn set_failpoint(&self, name: String, actions: String) -> AptosResult<String> {
         let mut base = self.build_path("set_failpoint")?;
         let url = base
             .query_pairs_mut()
@@ -817,39 +931,38 @@ impl Client {
         let response = self.inner.get(url.clone()).send().await?;
 
         if !response.status().is_success() {
-            let error_response = AptosError::parse_from_json(Some(response.json().await?));
-            return Err(anyhow::anyhow!("Request failed: {:?}", error_response));
+            Err(parse_error(response).await)
+        } else {
+            Ok(response
+                .text()
+                .await
+                .map_err(|e| anyhow::anyhow!("To text failed: {:?}", e))?)
         }
-
-        response
-            .text()
-            .await
-            .map_err(|e| anyhow::anyhow!("To text failed: {:?}", e))
     }
 
     async fn check_response(
         &self,
         response: reqwest::Response,
-    ) -> Result<(reqwest::Response, State)> {
+    ) -> AptosResult<(reqwest::Response, State)> {
         if !response.status().is_success() {
-            let error_response = AptosError::parse_from_json(Some(response.json().await?));
-            return Err(anyhow::anyhow!("Request failed: {:?}", error_response));
-        }
-        let state = State::from_headers(response.headers())?;
+            Err(parse_error(response).await)
+        } else {
+            let state = parse_state(&response)?;
 
-        Ok((response, state))
+            Ok((response, state))
+        }
     }
 
     async fn json<T: serde::de::DeserializeOwned>(
         &self,
         response: reqwest::Response,
-    ) -> Result<Response<T>> {
+    ) -> AptosResult<Response<T>> {
         let (response, state) = self.check_response(response).await?;
-        let json = response.json().await?;
+        let json = response.json().await.map_err(anyhow::Error::from)?;
         Ok(Response::new(json, state))
     }
 
-    pub async fn health_check(&self, seconds: u64) -> Result<()> {
+    pub async fn health_check(&self, seconds: u64) -> AptosResult<()> {
         let url = self.build_path("-/healthy")?;
         let response = self
             .inner
@@ -859,17 +972,17 @@ impl Client {
             .await?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("health check failed"));
+            Err(parse_error(response).await)
+        } else {
+            Ok(())
         }
-
-        Ok(())
     }
 
-    async fn get<T: DeserializeOwned>(&self, url: Url) -> Result<Response<T>> {
+    async fn get<T: DeserializeOwned>(&self, url: Url) -> AptosResult<Response<T>> {
         self.json(self.inner.get(url).send().await?).await
     }
 
-    async fn get_bcs(&self, url: Url) -> Result<Response<bytes::Bytes>> {
+    async fn get_bcs(&self, url: Url) -> AptosResult<Response<bytes::Bytes>> {
         let response = self.inner.get(url).header(ACCEPT, BCS).send().await?;
         self.check_and_parse_bcs_response(response).await
     }
@@ -879,7 +992,7 @@ impl Client {
         url: Url,
         start: Option<u64>,
         limit: Option<u16>,
-    ) -> Result<Response<bytes::Bytes>> {
+    ) -> AptosResult<Response<bytes::Bytes>> {
         let mut request = self.inner.get(url).header(ACCEPT, BCS);
         if let Some(start) = start {
             request = request.query(&[("start", start)])
@@ -896,10 +1009,78 @@ impl Client {
     async fn check_and_parse_bcs_response(
         &self,
         response: reqwest::Response,
-    ) -> Result<Response<bytes::Bytes>> {
+    ) -> AptosResult<Response<bytes::Bytes>> {
         let (response, state) = self.check_response(response).await?;
         Ok(Response::new(response.bytes().await?, state))
     }
+
+    pub async fn try_until_ok<F, Fut, RetryFun, T>(
+        total_wait: Option<Duration>,
+        initial_interval: Option<Duration>,
+        should_retry: RetryFun,
+        function: F,
+    ) -> AptosResult<T>
+    where
+        F: Fn() -> Fut,
+        RetryFun: Fn(StatusCode, Option<AptosError>) -> bool,
+        Fut: Future<Output = AptosResult<T>>,
+    {
+        let total_wait = total_wait.unwrap_or(DEFAULT_MAX_WAIT_DURATION);
+        let mut backoff = initial_interval.unwrap_or(DEFAULT_INTERVAL_DURATION);
+        let mut result = Err(RestError::Unknown(anyhow!("Failed to run function")));
+        let start = Instant::now();
+
+        // TODO: Add jitter
+        while start.elapsed() < total_wait {
+            result = function().await;
+
+            let retry = match &result {
+                Ok(_) => break,
+                Err(err) => match err {
+                    RestError::Api(inner) => {
+                        should_retry(inner.status_code, Some(inner.error.clone()))
+                    }
+                    RestError::Http(inner) => should_retry(*inner, None),
+                    RestError::Bcs(_)
+                    | RestError::Json(_)
+                    | RestError::Timeout(_)
+                    | RestError::Unknown(_) => true,
+                    RestError::UrlParse(_) => false,
+                },
+            };
+
+            if !retry {
+                break;
+            }
+
+            aptos_logger::info!(
+                "Failed to call API, retrying in {}ms: {:?}",
+                backoff.as_millis(),
+                result.as_ref().err().unwrap()
+            );
+
+            tokio::time::sleep(backoff).await;
+            backoff = backoff.saturating_mul(2);
+        }
+
+        result
+    }
+}
+
+pub fn retriable_with_404(status_code: StatusCode, aptos_error: Option<AptosError>) -> bool {
+    retriable(status_code, aptos_error) | matches!(status_code, StatusCode::NOT_FOUND)
+}
+
+pub fn retriable(status_code: StatusCode, _aptos_error: Option<AptosError>) -> bool {
+    matches!(
+        status_code,
+        StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::GATEWAY_TIMEOUT
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::INSUFFICIENT_STORAGE
+    )
 }
 
 impl From<(ReqwestClient, Url)> for Client {
@@ -920,4 +1101,23 @@ pub struct VersionedNewBlockEvent {
     pub version: u64,
     /// sequence number
     pub sequence_number: u64,
+}
+
+fn parse_state(response: &reqwest::Response) -> AptosResult<State> {
+    Ok(State::from_headers(response.headers())?)
+}
+
+fn parse_state_optional(response: &reqwest::Response) -> Option<State> {
+    State::from_headers(response.headers())
+        .map(Some)
+        .unwrap_or(None)
+}
+
+async fn parse_error(response: reqwest::Response) -> RestError {
+    let status_code = response.status();
+    let maybe_state = parse_state_optional(&response);
+    match response.json::<AptosError>().await {
+        Ok(error) => (error, maybe_state, status_code).into(),
+        Err(_) => RestError::Http(status_code),
+    }
 }

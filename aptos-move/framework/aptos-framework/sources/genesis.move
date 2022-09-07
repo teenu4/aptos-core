@@ -1,23 +1,24 @@
 module aptos_framework::genesis {
     use std::vector;
 
-    use aptos_framework::account;
     use aptos_framework::aggregator_factory;
     use aptos_framework::aptos_coin::{Self, AptosCoin};
     use aptos_framework::aptos_governance;
     use aptos_framework::block;
     use aptos_framework::chain_id;
     use aptos_framework::coin::{Self, MintCapability};
-    use aptos_framework::coins;
+    use aptos_framework::account;
     use aptos_framework::consensus_config;
     use aptos_framework::gas_schedule;
     use aptos_framework::reconfiguration;
     use aptos_framework::stake;
+    use aptos_framework::staking_config;
     use aptos_framework::timestamp;
     use aptos_framework::transaction_fee;
-    use aptos_framework::staking_config;
-    use aptos_framework::version;
+    use aptos_framework::transaction_validation;
     use aptos_framework::state_storage;
+    use aptos_framework::version;
+    use aptos_framework::chain_status;
 
     struct ValidatorConfiguration has copy, drop {
         owner_address: address,
@@ -48,25 +49,31 @@ module aptos_framework::genesis {
         // Initialize the aptos framework account. This is the account where system resources and modules will be
         // deployed to. This will be entirely managed by on-chain governance and no entities have the key or privileges
         // to use this account.
-        let (aptos_framework_account, framework_signer_cap) = account::create_aptos_framework_account();
-
+        let (aptos_framework_account, aptos_framework_signer_cap) = account::create_framework_reserved_account(@aptos_framework);
         // Initialize account configs on aptos framework account.
-        account::initialize(
+        account::initialize(&aptos_framework_account);
+
+        transaction_validation::initialize(
             &aptos_framework_account,
-            @aptos_framework,
-            b"account",
             b"script_prologue",
             b"module_prologue",
-            b"writeset_prologue",
             b"multi_agent_script_prologue",
             b"epilogue",
-            b"writeset_epilogue",
         );
 
-        account::create_address_map(&aptos_framework_account);
-
         // Give the decentralized on-chain governance control over the core framework account.
-        aptos_governance::store_signer_cap(&aptos_framework_account, @aptos_framework, framework_signer_cap);
+        aptos_governance::store_signer_cap(&aptos_framework_account, @aptos_framework, aptos_framework_signer_cap);
+
+        // put reserved framework reserved accounts under aptos governance
+        let framework_reserved_addresses = vector<address>[@0x2, @0x3, @0x4, @0x5, @0x6, @0x7, @0x8, @0x9, @0xa];
+        let i = 0;
+        while (!vector::is_empty(&framework_reserved_addresses)){
+            let address = vector::pop_back<address>(&mut framework_reserved_addresses);
+            let (aptos_account, framework_signer_cap) = account::create_framework_reserved_account(address);
+            aptos_governance::store_signer_cap(&aptos_account, address, framework_signer_cap);
+            i = i + 1;
+        };
+
 
         consensus_config::initialize(&aptos_framework_account, consensus_config);
         version::initialize(&aptos_framework_account, initial_version);
@@ -83,13 +90,10 @@ module aptos_framework::genesis {
         );
         gas_schedule::initialize(&aptos_framework_account, gas_schedule);
 
-        // Ensure we can create aggregators for supply, but not enable it for common
-        // use just yet.
+        // Ensure we can create aggregators for supply, but not enable it for common use just yet.
         aggregator_factory::initialize_aggregator_factory(&aptos_framework_account);
         coin::initialize_supply_config(&aptos_framework_account);
 
-        // This needs to be called at the very end because earlier initializations might rely on timestamp not being
-        // initialized yet.
         chain_id::initialize(&aptos_framework_account, chain_id);
         reconfiguration::initialize(&aptos_framework_account);
         block::initialize(&aptos_framework_account, epoch_interval_microsecs);
@@ -114,7 +118,7 @@ module aptos_framework::genesis {
         aptos_framework: &signer,
         core_resources_auth_key: vector<u8>,
     ) {
-        let core_resources = account::create_account_internal(@core_resources);
+        let core_resources = account::create_account(@core_resources);
         account::rotate_authentication_key_internal(&core_resources, core_resources_auth_key);
         let mint_cap = initialize_aptos_coin(aptos_framework);
         aptos_coin::configure_accounts_for_test(aptos_framework, &core_resources, mint_cap);
@@ -135,20 +139,20 @@ module aptos_framework::genesis {
         let num_validators = vector::length(&validators);
         while (i < num_validators) {
             let validator = vector::borrow(&validators, i);
-            let owner = &account::create_account_internal(validator.owner_address);
+            let owner = &account::create_account(validator.owner_address);
             let operator = owner;
             // Create the operator account if it's different from owner.
             if (validator.operator_address != validator.owner_address) {
-                operator = &account::create_account_internal(validator.operator_address);
+                operator = &account::create_account(validator.operator_address);
             };
             // Create the voter account if it's different from owner and operator.
             if (validator.voter_address != validator.owner_address &&
                 validator.voter_address != validator.operator_address) {
-                account::create_account_internal(validator.voter_address);
+                account::create_account(validator.voter_address);
             };
 
             // Mint the initial staking amount to the validator.
-            coins::register<AptosCoin>(owner);
+            coin::register<AptosCoin>(owner);
             aptos_coin::mint(aptos_framework, validator.owner_address, validator.stake_amount);
 
             // Initialize the stake pool and join the validator set.
@@ -182,6 +186,11 @@ module aptos_framework::genesis {
         stake::on_new_epoch();
     }
 
+    /// The last step of genesis.
+    fun set_genesis_end(aptos_framework: &signer) {
+        chain_status::set_genesis_end(aptos_framework);
+    }
+
     #[test_only]
     public fun setup() {
         initialize(
@@ -202,9 +211,16 @@ module aptos_framework::genesis {
 
     #[test]
     fun test_setup() {
-        use aptos_framework::account;
-
         setup();
-        assert!(account::exists_at(@aptos_framework), 0);
+        assert!(account::exists_at(@aptos_framework), 1);
+        assert!(account::exists_at(@0x2), 1);
+        assert!(account::exists_at(@0x3), 1);
+        assert!(account::exists_at(@0x4), 1);
+        assert!(account::exists_at(@0x5), 1);
+        assert!(account::exists_at(@0x6), 1);
+        assert!(account::exists_at(@0x7), 1);
+        assert!(account::exists_at(@0x8), 1);
+        assert!(account::exists_at(@0x9), 1);
+        assert!(account::exists_at(@0xa), 1);
     }
 }

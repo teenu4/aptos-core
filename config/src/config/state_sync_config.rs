@@ -4,14 +4,7 @@
 use crate::config::MAX_APPLICATION_MESSAGE_SIZE;
 use serde::{Deserialize, Serialize};
 
-/// We allow a buffer in case network messages get slightly larger after they
-/// are checked against the max frame size but before they are actually sent to
-/// the networking stack. This can occur in specific cases, e.g., if the
-/// message is wrapped in an another type before being sent down the wire. We
-/// should rarely see this in practice (if ever), but let's play it safe.
-const MESSAGE_PADDING_SIZE: usize = 128 * 1024; // 128 KB
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StateSyncConfig {
     pub data_streaming_service: DataStreamingServiceConfig,
@@ -22,7 +15,7 @@ pub struct StateSyncConfig {
 
 /// The bootstrapping mode determines how the node will bootstrap to the latest
 /// blockchain state, e.g., directly download the latest states.
-#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum BootstrappingMode {
     ApplyTransactionOutputsFromGenesis, // Applies transaction outputs (starting at genesis)
     DownloadLatestStates, // Downloads the state keys and values (at the latest version)
@@ -46,7 +39,7 @@ impl BootstrappingMode {
 /// The continuous syncing mode determines how the node will stay up-to-date
 /// once it has bootstrapped and the blockchain continues to grow, e.g.,
 /// continuously executing all transactions.
-#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum ContinuousSyncingMode {
     ApplyTransactionOutputs, // Applies transaction outputs to stay up-to-date
     ExecuteTransactions,     // Executes transactions to stay up-to-date
@@ -61,7 +54,7 @@ impl ContinuousSyncingMode {
     }
 }
 
-#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StateSyncDriverConfig {
     pub bootstrapping_mode: BootstrappingMode, // The mode by which to bootstrap
@@ -93,7 +86,7 @@ impl Default for StateSyncDriverConfig {
     }
 }
 
-#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StorageServiceConfig {
     pub max_concurrent_requests: u64, // Max num of concurrent storage server tasks
@@ -113,19 +106,19 @@ impl Default for StorageServiceConfig {
         Self {
             max_concurrent_requests: 4000,
             max_epoch_chunk_size: 100,
-            max_lru_cache_size: 100,
+            max_lru_cache_size: 500, // At ~0.6MiB per chunk, this should take no more than 0.5GiB
             max_network_channel_size: 4000,
-            max_network_chunk_bytes: (MAX_APPLICATION_MESSAGE_SIZE - MESSAGE_PADDING_SIZE) as u64,
+            max_network_chunk_bytes: MAX_APPLICATION_MESSAGE_SIZE as u64,
             max_state_chunk_size: 2000,
             max_subscription_period_ms: 5000,
-            max_transaction_chunk_size: 1000,
-            max_transaction_output_chunk_size: 1000,
+            max_transaction_chunk_size: 2000,
+            max_transaction_output_chunk_size: 2000,
             storage_summary_refresh_interval_ms: 50,
         }
     }
 }
 
-#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DataStreamingServiceConfig {
     // The interval (milliseconds) at which to refresh the global data summary.
@@ -158,17 +151,17 @@ impl Default for DataStreamingServiceConfig {
     fn default() -> Self {
         Self {
             global_summary_refresh_interval_ms: 50,
-            max_concurrent_requests: 2,
-            max_concurrent_state_requests: 4,
-            max_data_stream_channel_sizes: 1000,
+            max_concurrent_requests: 3,
+            max_concurrent_state_requests: 6,
+            max_data_stream_channel_sizes: 300,
             max_request_retry: 3,
-            max_notification_id_mappings: 2000,
+            max_notification_id_mappings: 300,
             progress_check_interval_ms: 100,
         }
     }
 }
 
-#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AptosDataClientConfig {
     pub max_num_in_flight_priority_polls: u64, // Max num of in-flight polls for priority peers

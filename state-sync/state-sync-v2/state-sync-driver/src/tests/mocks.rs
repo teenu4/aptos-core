@@ -30,10 +30,12 @@ use aptos_types::{
     },
 };
 use async_trait::async_trait;
+use data_streaming_service::data_stream::DataStreamId;
+use data_streaming_service::streaming_client::NotificationAndFeedback;
 use data_streaming_service::{
     data_notification::NotificationId,
     data_stream::DataStreamListener,
-    streaming_client::{DataStreamingClient, Epoch, NotificationFeedback},
+    streaming_client::{DataStreamingClient, Epoch},
 };
 use executor_types::{ChunkCommitNotification, ChunkExecutorTrait};
 use mockall::mock;
@@ -223,8 +225,6 @@ mock! {
 
         fn get_latest_ledger_info(&self) -> Result<LedgerInfoWithSignatures>;
 
-        fn get_latest_version_option(&self) -> Result<Option<Version>>;
-
         fn get_latest_version(&self) -> Result<Version>;
 
         fn get_latest_commit_metadata(&self) -> Result<(Version, u64)>;
@@ -288,7 +288,7 @@ mock! {
             chunk_size: usize,
         ) -> Result<StateValueChunkWithProof>;
 
-        fn get_state_prune_window(&self) -> Result<usize>;
+        fn get_epoch_snapshot_prune_window(&self) -> Result<usize>;
     }
 }
 
@@ -410,8 +410,8 @@ mock! {
 
         async fn terminate_stream_with_feedback(
             &self,
-            notification_id: NotificationId,
-            notification_feedback: NotificationFeedback,
+            data_stream_id: DataStreamId,
+            notification_and_feedback: Option<NotificationAndFeedback>,
         ) -> Result<(), data_streaming_service::error::Error>;
     }
     impl Clone for StreamingClient {
@@ -422,8 +422,9 @@ mock! {
 // This automatically creates a MockStorageSynchronizer.
 mock! {
     pub StorageSynchronizer {}
+    #[async_trait]
     impl StorageSynchronizerInterface for StorageSynchronizer {
-        fn apply_transaction_outputs(
+        async fn apply_transaction_outputs(
             &mut self,
             notification_id: NotificationId,
             output_list_with_proof: TransactionOutputListWithProof,
@@ -431,7 +432,7 @@ mock! {
             end_of_epoch_ledger_info: Option<LedgerInfoWithSignatures>,
         ) -> Result<(), crate::error::Error>;
 
-        fn execute_transactions(
+        async fn execute_transactions(
             &mut self,
             notification_id: NotificationId,
             transaction_list_with_proof: TransactionListWithProof,

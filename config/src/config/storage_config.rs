@@ -16,7 +16,7 @@ pub const TARGET_SNAPSHOT_SIZE: usize = 100_000;
 /// Port selected RocksDB options for tuning underlying rocksdb instance of AptosDB.
 /// see <https://github.com/facebook/rocksdb/blob/master/include/rocksdb/options.h>
 /// for detailed explanations.
-#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct RocksdbConfig {
     pub max_open_files: i32,
     pub max_total_wal_size: u64,
@@ -47,7 +47,7 @@ impl Default for RocksdbConfig {
     }
 }
 
-#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RocksdbConfigs {
     pub ledger_db_config: RocksdbConfig,
@@ -68,10 +68,9 @@ impl Default for RocksdbConfigs {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
-    pub address: SocketAddr,
     pub backup_service_address: SocketAddr,
     pub dir: PathBuf,
     pub storage_pruner_config: PrunerConfig,
@@ -100,7 +99,11 @@ pub const NO_OP_STORAGE_PRUNER_CONFIG: PrunerConfig = PrunerConfig {
         enable: false,
         prune_window: 0,
         batch_size: 0,
-        user_pruning_window_offset: 0,
+    },
+    epoch_snapshot_pruner_config: EpochSnapshotPrunerConfig {
+        enable: false,
+        prune_window: 0,
+        batch_size: 0,
     },
 };
 
@@ -133,8 +136,30 @@ pub struct StateMerklePrunerConfig {
     /// Similar to the variable above but for state store pruner. It means the number of stale
     /// nodes to prune a time.
     pub batch_size: usize,
-    /// The offset for user pruning window to adjust
-    pub user_pruning_window_offset: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EpochSnapshotPrunerConfig {
+    pub enable: bool,
+    /// Window size in versions, but only the snapshots at epoch ending versions are kept, because
+    /// other snapshots are pruned by the state merkle pruner.
+    pub prune_window: u64,
+    /// Number of stale nodes to prune a time.
+    pub batch_size: usize,
+}
+
+// Config for the epoch ending state pruner is actually in the same format as the state merkle
+// pruner, but it has it's own type hence separate default values. This converts it to the same
+// type, to use the same pruner implementation (but parameterized on the stale node index DB schema).
+impl From<EpochSnapshotPrunerConfig> for StateMerklePrunerConfig {
+    fn from(config: EpochSnapshotPrunerConfig) -> Self {
+        Self {
+            enable: config.enable,
+            prune_window: config.prune_window,
+            batch_size: config.batch_size,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Default)]
@@ -142,6 +167,7 @@ pub struct StateMerklePrunerConfig {
 pub struct PrunerConfig {
     pub ledger_pruner_config: LedgerPrunerConfig,
     pub state_merkle_pruner_config: StateMerklePrunerConfig,
+    pub epoch_snapshot_pruner_config: EpochSnapshotPrunerConfig,
 }
 
 impl Default for LedgerPrunerConfig {
@@ -161,12 +187,31 @@ impl Default for StateMerklePrunerConfig {
     fn default() -> Self {
         StateMerklePrunerConfig {
             enable: true,
-            // This is based on ~5K TPS * 2h/epoch * 2 epochs.
+            // This allows a block / chunk being executed to have access to a non-latest state tree.
+            // It needs to be greater than the number of versions the state committing thread is
+            // able to commit during the execution of the block / chunk.
+            prune_window: 100_000,
+            // A 10k transaction block (touching 60k state values, in the case of the account
+            // creation benchmark) on a 4B items DB (or 1.33B accounts) yields 300k JMT nodes
+            batch_size: 1_000,
+        }
+    }
+}
+
+impl Default for EpochSnapshotPrunerConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            // This is based on ~5K TPS * 2h/epoch * 2 epochs. -- epoch ending snapshots are used
+            // by state sync in fast sync mode.
+            // The setting is in versions, not epochs, because this makes it behave more like other
+            // pruners: a slower network will have longer history in db with the same pruner
+            // settings, but the disk space take will be similar.
+            // settings.
             prune_window: 80_000_000,
             // A 10k transaction block (touching 60k state values, in the case of the account
             // creation benchmark) on a 4B items DB (or 1.33B accounts) yields 300k JMT nodes
             batch_size: 1_000,
-            user_pruning_window_offset: 200_000,
         }
     }
 }
@@ -174,7 +219,6 @@ impl Default for StateMerklePrunerConfig {
 impl Default for StorageConfig {
     fn default() -> StorageConfig {
         StorageConfig {
-            address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6666),
             backup_service_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6186),
             dir: PathBuf::from("db"),
             // The prune window must at least out live a RPC request because its sub requests are
@@ -207,8 +251,22 @@ impl StorageConfig {
     }
 
     pub fn randomize_ports(&mut self) {
-        self.address.set_port(utils::get_available_port());
         self.backup_service_address
             .set_port(utils::get_available_port());
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::config::PrunerConfig;
+
+    #[test]
+    pub fn tset_default_prune_window() {
+        // Not that these can't be changed, but think twice -- make them safe for mainnet
+
+        let config = PrunerConfig::default();
+        assert!(config.ledger_pruner_config.prune_window >= 50_000_000);
+        assert!(config.state_merkle_pruner_config.prune_window >= 100_000);
+        assert!(config.epoch_snapshot_pruner_config.prune_window > 50_000_000);
     }
 }

@@ -86,7 +86,7 @@ impl ReleaseTarget {
         ReleaseBundle::read(path)
     }
 
-    pub fn create_release(self, strip: bool, out: Option<PathBuf>) -> anyhow::Result<()> {
+    pub fn create_release(self, out: Option<PathBuf>) -> anyhow::Result<()> {
         let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let packages = self
             .packages()
@@ -99,9 +99,10 @@ impl ReleaseTarget {
             build_options: BuildOptions {
                 with_srcs: true,
                 with_abis: true,
-                with_source_maps: true,
+                with_source_maps: false,
                 with_error_map: true,
                 named_addresses: Default::default(),
+                install_dir: None,
             },
             packages: packages.iter().map(|(path, _)| path.to_owned()).collect(),
             rust_bindings: packages
@@ -121,7 +122,26 @@ impl ReleaseTarget {
                 PathBuf::from(self.file_name())
             },
         };
-        options.create_release(strip)
+
+        #[cfg(unix)]
+        {
+            options.create_release()
+        }
+        #[cfg(windows)]
+        {
+            // Windows requires to set the stack because the package compiler puts too much on the
+            // stack for the default size.  A quick internet search has shown the new thread with
+            // a custom stack size is the easiest course of action.
+            const STACK_SIZE: usize = 4 * 1024 * 1024;
+            let child_thread = std::thread::Builder::new()
+                .name("Framework-release".to_string())
+                .stack_size(STACK_SIZE)
+                .spawn(|| options.create_release())
+                .expect("Expected to spawn release thread");
+            child_thread
+                .join()
+                .expect("Expected to join release thread")
+        }
     }
 }
 

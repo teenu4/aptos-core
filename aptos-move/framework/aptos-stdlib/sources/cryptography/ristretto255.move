@@ -82,7 +82,7 @@ module aptos_std::ristretto255 {
 
     /// This struct represents a scalar as a little-endian byte encoding of an integer in $\mathbb{Z}_\ell$, which is
     /// stored in `data`. Here, \ell denotes the order of the scalar field (and the underlying elliptic curve group).
-    struct Scalar has key, copy, store, drop {
+    struct Scalar has copy, store, drop {
         data: vector<u8>
     }
 
@@ -694,6 +694,7 @@ module aptos_std::ristretto255 {
         test_point_add_assign_internal(3, 7);
     }
 
+    #[test_only]
     fun test_point_add_assign_internal(before_a_gap: u64, before_b_gap: u64) {
         // create extra RistrettoPoints here, so as to generate different PointStore layouts inside the native Rust implementation
         let c = before_a_gap;

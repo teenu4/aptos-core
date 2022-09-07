@@ -8,13 +8,13 @@ use crate::{
     metrics::LATEST_SNAPSHOT_VERSION,
     state_store::{buffered_state::CommitMessage, StateDb},
     version_data::VersionDataSchema,
-    OTHER_TIMERS_SECONDS,
+    PrunerManager, OTHER_TIMERS_SECONDS,
 };
 use anyhow::{anyhow, ensure, Result};
 use aptos_crypto::HashValue;
 use aptos_jellyfish_merkle::node_type::NodeKey;
 use aptos_logger::{info, trace};
-use aptos_state_view::state_storage_usage::StateStorageUsage;
+use aptos_types::state_store::state_storage_usage::StateStorageUsage;
 use schemadb::SchemaBatch;
 use std::sync::{mpsc::Receiver, Arc};
 use storage_interface::state_delta::StateDelta;
@@ -81,6 +81,12 @@ impl StateMerkleBatchCommitter {
                         .current_version
                         .expect("Current version should not be None");
                     LATEST_SNAPSHOT_VERSION.set(current_version as i64);
+                    self.state_db
+                        .state_pruner
+                        .maybe_set_pruner_target_db_version(current_version);
+                    self.state_db
+                        .epoch_snapshot_pruner
+                        .maybe_set_pruner_target_db_version(current_version);
 
                     self.check_usage_consistency(&state_delta).unwrap();
                 }

@@ -1,6 +1,7 @@
 // Copyright (c) Aptos
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::natives::any::Any;
 use anyhow::bail;
 use aptos_types::transaction::ModuleBundle;
 use aptos_types::vm_status::StatusCode;
@@ -17,12 +18,43 @@ use move_deps::{
         loaded_data::runtime_types::Type, natives::function::NativeResult, values::Value,
     },
 };
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
+
+/// A wrapper around the representation of a Move Option, which is a vector with 0 or 1 element.
+/// TODO: move this elsewhere for reuse?
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct MoveOption<T> {
+    pub value: Vec<T>,
+}
+
+impl<T> Default for MoveOption<T> {
+    fn default() -> Self {
+        MoveOption::none()
+    }
+}
+
+impl<T> MoveOption<T> {
+    pub fn none() -> Self {
+        Self { value: vec![] }
+    }
+
+    pub fn some(x: T) -> Self {
+        Self { value: vec![x] }
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.value.is_empty()
+    }
+
+    pub fn is_some(&self) -> bool {
+        !self.value.is_empty()
+    }
+}
 
 /// The package registry at the given address.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -31,36 +63,35 @@ pub struct PackageRegistry {
     pub packages: Vec<PackageMetadata>,
 }
 
-/// The PackageMetadata type. All blobs are encoded as base64-gzipped.
+/// The PackageMetadata type. This must be kept in sync with `code.move`. Documentation is
+/// also found there.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct PackageMetadata {
-    /// Name of this package.
     pub name: String,
-    /// The upgrade policy of this package.
     pub upgrade_policy: UpgradePolicy,
-    /// The numbers of times this module has been upgraded. Also serves as the on-chain version.
-    /// This field will be automatically assigned on successful upgrade.
     pub upgrade_number: u64,
-    /// Build info, in BuildInfo.yaml format
-    pub build_info: String,
-    /// The package manifest, in the Move.toml format.
-    pub manifest: String,
-    /// The list of modules installed by this package.
+    pub source_digest: String,
+    #[serde(with = "serde_bytes")]
+    pub manifest: Vec<u8>,
     pub modules: Vec<ModuleMetadata>,
-    /// Error map, in compressed BCS
-    pub error_map: String,
-    /// ABIs, in compressed BCS
-    pub abis: Vec<String>,
+    pub deps: Vec<PackageDep>,
+    pub extension: MoveOption<Any>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub struct PackageDep {
+    pub account: AccountAddress,
+    pub package_name: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModuleMetadata {
-    /// Name of the module.
     pub name: String,
-    /// Source text if available, in compressed form.
-    pub source: String,
-    /// Source map, in BCS encoding, in compressed form.
-    pub source_map: String,
+    #[serde(with = "serde_bytes")]
+    pub source: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub source_map: Vec<u8>,
+    pub extension: MoveOption<Any>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,44 +131,6 @@ impl fmt::Display for UpgradePolicy {
             _ => "immutable",
         })
     }
-}
-
-// ========================================================================================
-// Duplication for JSON
-
-// For JSON we need attributes on fields which aren't compatible with BCS, therefore we
-// need to duplicate the definitions...
-
-fn deserialize_from_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: FromStr,
-    <T as FromStr>::Err: std::fmt::Display,
-{
-    use serde::de::Error;
-
-    let s = <String>::deserialize(deserializer)?;
-    s.parse::<T>().map_err(D::Error::custom)
-}
-
-/// The package registry at the given address.
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub struct PackageRegistryJson {
-    pub packages: Vec<PackageMetadataJson>,
-}
-
-/// The PackageMetadata type, with an annotation on `upgrade_number`.
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub struct PackageMetadataJson {
-    pub name: String,
-    pub upgrade_policy: UpgradePolicy,
-    #[serde(deserialize_with = "deserialize_from_string")]
-    pub upgrade_number: u64,
-    pub build_info: String,
-    pub manifest: String,
-    pub modules: Vec<ModuleMetadata>,
-    pub error_map: String,
-    pub abis: Vec<String>,
 }
 
 // ========================================================================================

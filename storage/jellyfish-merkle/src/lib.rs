@@ -73,7 +73,7 @@ pub mod iterator;
 mod jellyfish_merkle_test;
 pub mod metrics;
 #[cfg(any(test, feature = "fuzzing"))]
-mod mock_tree_store;
+pub mod mock_tree_store;
 pub mod node_type;
 pub mod restore;
 #[cfg(any(test, feature = "fuzzing"))]
@@ -144,13 +144,6 @@ pub trait TreeWriter<K>: Send + Sync {
     fn write_node_batch(&self, node_batch: &HashMap<NodeKey, Node<K>>) -> Result<()>;
 }
 
-pub trait StateValueWriter<K, V>: Send + Sync {
-    /// Writes a kv batch into storage.
-    fn write_kv_batch(&self, kv_batch: &StateValueBatch<K, Option<V>>) -> Result<()>;
-
-    fn write_usage(&self, version: Version, items: usize, total_bytes: usize) -> Result<()>;
-}
-
 pub trait Key: Clone + Serialize + DeserializeOwned + Send + Sync {
     fn key_size(&self) -> usize;
 }
@@ -190,8 +183,6 @@ impl TestKey for StateKey {}
 
 /// Node batch that will be written into db atomically with other batches.
 pub type NodeBatch<K> = HashMap<NodeKey, Node<K>>;
-/// Key-Value batch that will be written into db atomically with other batches.
-pub type StateValueBatch<K, V> = HashMap<(K, Version), V>;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NodeStats {
@@ -923,6 +914,33 @@ where
     pub fn get_leaf_count(&self, version: Version) -> Result<usize> {
         self.get_root_node(version).map(|n| n.leaf_count())
     }
+
+    pub fn get_all_nodes_referenced(&self, version: Version) -> Result<Vec<NodeKey>> {
+        let mut out_keys = vec![];
+        self.get_all_nodes_referenced_impl(NodeKey::new_empty_path(version), &mut out_keys)?;
+        Ok(out_keys)
+    }
+
+    fn get_all_nodes_referenced_impl(
+        &self,
+        key: NodeKey,
+        out_keys: &mut Vec<NodeKey>,
+    ) -> Result<()> {
+        match self.reader.get_node(&key)? {
+            Node::Internal(internal_node) => {
+                for (child_nibble, child) in internal_node.children_sorted() {
+                    self.get_all_nodes_referenced_impl(
+                        key.gen_child_node_key(child.version, *child_nibble),
+                        out_keys,
+                    )?;
+                }
+            }
+            Node::Leaf(_) | Node::Null => {}
+        };
+
+        out_keys.push(key);
+        Ok(())
+    }
 }
 
 trait NibbleExt {
@@ -933,7 +951,6 @@ trait NibbleExt {
 impl NibbleExt for HashValue {
     /// Returns the `index`-th nibble.
     fn get_nibble(&self, index: usize) -> Nibble {
-        mirai_annotations::precondition!(index < HashValue::LENGTH);
         Nibble::from(if index % 2 == 0 {
             self[index / 2] >> 4
         } else {

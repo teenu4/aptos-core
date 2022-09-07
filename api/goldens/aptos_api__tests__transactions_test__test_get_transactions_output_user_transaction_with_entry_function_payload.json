@@ -23,7 +23,16 @@
               "guid": {
                 "id": {
                   "addr": "0x1",
-                  "creation_num": "2"
+                  "creation_num": "3"
+                }
+              }
+            },
+            "update_epoch_interval_events": {
+              "counter": "0",
+              "guid": {
+                "id": {
+                  "addr": "0x1",
+                  "creation_num": "4"
                 }
               }
             }
@@ -51,11 +60,9 @@
         "address": "0x1",
         "state_key_hash": "",
         "data": {
-          "type": "0x1::state_storage::StateStorageUsage",
+          "type": "0x1::timestamp::CurrentTimeMicroseconds",
           "data": {
-            "bytes": "300719",
-            "epoch": "1",
-            "items": "100"
+            "microseconds": "500000"
           }
         },
         "type": "write_resource"
@@ -64,10 +71,8 @@
         "address": "0x1",
         "state_key_hash": "",
         "data": {
-          "type": "0x1::timestamp::CurrentTimeMicroseconds",
-          "data": {
-            "microseconds": "500000"
-          }
+          "type": "0x1::state_storage::StateStorageUsage",
+          "data": "state storage omitted"
         },
         "type": "write_resource"
       }
@@ -77,7 +82,7 @@
     "round": "1",
     "events": [
       {
-        "key": "0x02000000000000000000000000000000000000000000000000000000000000000000000000000001",
+        "key": "0x03000000000000000000000000000000000000000000000000000000000000000000000000000001",
         "sequence_number": "1",
         "type": "0x1::block::NewBlockEvent",
         "data": {
@@ -106,7 +111,7 @@
     "state_change_hash": "",
     "event_root_hash": "",
     "state_checkpoint_hash": null,
-    "gas_used": "3",
+    "gas_used": "50",
     "success": true,
     "vm_status": "Executed successfully",
     "accumulator_root_hash": "",
@@ -119,11 +124,21 @@
           "data": {
             "authentication_key": "0xcef8ffd1ab9017e96132df8a56b22de39a8155e1c3fc32affbbf93eb624b532a",
             "coin_register_events": {
-              "counter": "0",
+              "counter": "1",
               "guid": {
                 "id": {
                   "addr": "0xa550c18",
                   "creation_num": "0"
+                }
+              }
+            },
+            "guid_creation_num": "4",
+            "key_rotation_events": {
+              "counter": "0",
+              "guid": {
+                "id": {
+                  "addr": "0xa550c18",
+                  "creation_num": "1"
                 }
               }
             },
@@ -133,37 +148,6 @@
               }
             },
             "sequence_number": "1",
-            "signer_capability_offer": {
-              "for": {
-                "vec": []
-              }
-            }
-          }
-        },
-        "type": "write_resource"
-      },
-      {
-        "address": "0x34bf7e2d17674feb234371a7ea58efd715f0e56ba20ebf13789480d9d643afaf",
-        "state_key_hash": "",
-        "data": {
-          "type": "0x1::account::Account",
-          "data": {
-            "authentication_key": "0x34bf7e2d17674feb234371a7ea58efd715f0e56ba20ebf13789480d9d643afaf",
-            "coin_register_events": {
-              "counter": "1",
-              "guid": {
-                "id": {
-                  "addr": "0x34bf7e2d17674feb234371a7ea58efd715f0e56ba20ebf13789480d9d643afaf",
-                  "creation_num": "0"
-                }
-              }
-            },
-            "rotation_capability_offer": {
-              "for": {
-                "vec": []
-              }
-            },
-            "sequence_number": "0",
             "signer_capability_offer": {
               "for": {
                 "vec": []
@@ -187,7 +171,7 @@
               "guid": {
                 "id": {
                   "addr": "0x34bf7e2d17674feb234371a7ea58efd715f0e56ba20ebf13789480d9d643afaf",
-                  "creation_num": "1"
+                  "creation_num": "2"
                 }
               }
             },
@@ -197,7 +181,7 @@
               "guid": {
                 "id": {
                   "addr": "0x34bf7e2d17674feb234371a7ea58efd715f0e56ba20ebf13789480d9d643afaf",
-                  "creation_num": "2"
+                  "creation_num": "3"
                 }
               }
             }
@@ -209,9 +193,39 @@
         "address": "0x34bf7e2d17674feb234371a7ea58efd715f0e56ba20ebf13789480d9d643afaf",
         "state_key_hash": "",
         "data": {
-          "type": "0x1::guid::Generator",
+          "type": "0x1::account::Account",
           "data": {
-            "counter": "3"
+            "authentication_key": "0x34bf7e2d17674feb234371a7ea58efd715f0e56ba20ebf13789480d9d643afaf",
+            "coin_register_events": {
+              "counter": "1",
+              "guid": {
+                "id": {
+                  "addr": "0x34bf7e2d17674feb234371a7ea58efd715f0e56ba20ebf13789480d9d643afaf",
+                  "creation_num": "0"
+                }
+              }
+            },
+            "guid_creation_num": "4",
+            "key_rotation_events": {
+              "counter": "0",
+              "guid": {
+                "id": {
+                  "addr": "0x34bf7e2d17674feb234371a7ea58efd715f0e56ba20ebf13789480d9d643afaf",
+                  "creation_num": "1"
+                }
+              }
+            },
+            "rotation_capability_offer": {
+              "for": {
+                "vec": []
+              }
+            },
+            "sequence_number": "0",
+            "signer_capability_offer": {
+              "for": {
+                "vec": []
+              }
+            }
           }
         },
         "type": "write_resource"
@@ -223,7 +237,7 @@
     "gas_unit_price": "0",
     "expiration_timestamp_secs": "18446744073709551615",
     "payload": {
-      "function": "0x1::account::create_account",
+      "function": "0x1::aptos_account::create_account",
       "type_arguments": [],
       "arguments": [
         "0x34bf7e2d17674feb234371a7ea58efd715f0e56ba20ebf13789480d9d643afaf"
@@ -232,7 +246,7 @@
     },
     "signature": {
       "public_key": "0x14418f867a0bd6d42abb2daa50cd68a5a869ce208282481f57504f630510d0d3",
-      "signature": "0x3d9ad7a6c36835ebe99b440ae3d6d39da70ee1cc144f18702726f2f0109b50c227a6227d062c8e3eb8c5defb9f810e73b07c8c63beeec5affa512638c8136a00",
+      "signature": "0xb11893ff961e5e59aaa540132fab5266b2caf4ea94758974454f996f0cbebe7a07dd8f91449b83fcec4b7a0672b52a2f1cb7ac9b0b83c9e66d569971eadf710f",
       "type": "ed25519_signature"
     },
     "events": [

@@ -19,8 +19,8 @@ use crate::{
         account_resource_identifier, coin_store_resource_identifier,
         deposit_events_field_identifier, sequence_number_field_identifier,
         withdraw_events_field_identifier, AccountIdentifier, BlockIdentifier, Error,
-        NetworkIdentifier, OperationIdentifier, OperationStatus, OperationStatusType,
-        OperationType, TransactionIdentifier,
+        OperationIdentifier, OperationStatus, OperationStatusType, OperationType,
+        TransactionIdentifier,
     },
     ApiError,
 };
@@ -35,7 +35,9 @@ use aptos_rest_client::{
     aptos_api_types::{WriteSetChange, U64},
 };
 use aptos_types::{account_address::AccountAddress, event::EventKey};
+use cached_packages::aptos_stdlib;
 use serde::{de::Error as SerdeError, Deserialize, Deserializer, Serialize};
+use std::cmp::Ordering;
 use std::{
     collections::HashMap,
     convert::{TryFrom, TryInto},
@@ -61,8 +63,7 @@ pub struct Allow {
     /// If the server is allowed to lookup historical transactions
     pub historical_balance_lookup: bool,
     /// All times after this are valid timestamps
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timestamp_start_index: Option<u64>,
+    pub timestamp_start_index: u64,
     /// All call methods supported
     pub call_methods: Vec<String>,
     /// A list of balance exemptions.  These should be as minimal as possible, otherwise it becomes
@@ -71,12 +72,6 @@ pub struct Allow {
     /// Determines if mempool can change the balance on an account
     /// This should be set to false
     pub mempool_coins: bool,
-    /// Case specifics for block hashes.  Set to None if case insensitive
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub block_hash_case: Option<Case>,
-    /// Case specifics for transaction hashes.  Set to None if case insensitive
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transaction_hash_case: Option<Case>,
 }
 
 /// Amount of a [`Currency`] in atomic units
@@ -100,21 +95,9 @@ impl From<Balance> for Amount {
     }
 }
 
-/// Balance exemptions where the current balance of an account can change without a transaction
-/// operation.  This is typically e
-///
 /// [API Spec](https://www.rosetta-api.org/docs/models/BalanceExemption.html)
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BalanceExemption {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sub_account_address: Option<String>,
-    /// The currency that can change based on the exemption
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub currency: Option<Currency>,
-    /// The exemption type of which direction a balance can change
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub exemption_type: Option<ExemptionType>,
-}
+pub struct BalanceExemption {}
 
 /// Representation of a Block for a blockchain.  For aptos it is the version
 ///
@@ -131,32 +114,6 @@ pub struct Block {
     pub transactions: Vec<Transaction>,
 }
 
-/// Events that allow lighter weight block updates of add and removing block
-///
-/// [API Spec](https://www.rosetta-api.org/docs/models/BlockEvent.html)
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BlockEvent {
-    /// Ordered event index for events on a NetworkIdentifier (likely the same as version)
-    pub sequence: u64,
-    /// Block identifier of the block to change
-    pub block_identifier: BlockIdentifier,
-    /// Block event type add or remove block
-    #[serde(rename = "type")]
-    pub block_event_type: BlockEventType,
-    /// Transactions associated with the update, it should be only one transaction in Aptos.
-    pub transactions: Vec<Transaction>,
-}
-
-/// Determines if the event is about adding or removing blocks
-///
-/// [API Spec](https://www.rosetta-api.org/docs/models/BlockEventType.html)
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BlockEventType {
-    BlockAdded,
-    BlockRemoved,
-}
-
 /// A combination of a transaction and the block associated.  In Aptos, this is just the same
 /// as the version associated with the transaction
 ///
@@ -169,17 +126,6 @@ pub struct BlockTransaction {
     transaction: Transaction,
 }
 
-/// Tells what cases are supported in hashes. Having no value is case insensitive.
-///
-///[API Spec](https://www.rosetta-api.org/docs/models/Case.html)
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Case {
-    UpperCase,
-    LowerCase,
-    CaseSensitive,
-}
-
 /// Currency represented as atomic units including decimals
 ///
 /// [API Spec](https://www.rosetta-api.org/docs/models/Currency.html)
@@ -188,7 +134,7 @@ pub struct Currency {
     /// Symbol of currency
     pub symbol: String,
     /// Number of decimals to be considered in the currency
-    pub decimals: u64,
+    pub decimals: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<CurrencyMetadata>,
 }
@@ -204,40 +150,6 @@ pub struct CurrencyMetadata {
 #[serde(rename_all = "snake_case")]
 pub enum CurveType {
     Edwards25519,
-    Secp256k1,
-    Secp256r1,
-    Tweedle,
-    Pallas,
-}
-
-/// Used for related transactions to determine direction of relation
-///
-/// [API Spec](https://www.rosetta-api.org/docs/models/Direction.html)
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Direction {
-    /// Associated to a later transaction
-    Forward,
-    /// Associated to an earlier transaction
-    Backward,
-}
-
-/// Tells how balances can change without a specific transaction on the account
-///
-/// Balance exemptions are not necessary, because staking rewards go to the staking
-/// pool and not to the account.  When they are removed from the pool, normal events
-/// for transfer will occur.
-///
-/// [API Spec](https://www.rosetta-api.org/docs/models/ExemptionType.html)
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExemptionType {
-    /// Balance can be greater than or equal to the current balance e.g. staking
-    GreaterOrEqual,
-    /// Balance can be less than or equal to the current balance
-    LessOrEqual,
-    /// Balance can be less than or greater than the current balance e.g. dynamic supplies
-    Dynamic,
 }
 
 /// A representation of a single account change in a transaction
@@ -248,14 +160,12 @@ pub enum ExemptionType {
 pub struct Operation {
     /// Identifier of an operation within a transaction
     pub operation_identifier: OperationIdentifier,
-    /// Related operations e.g. multiple operations that are related to a transfer
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub related_operations: Option<Vec<OperationIdentifier>>,
     /// Type of operation
     #[serde(rename = "type")]
     pub operation_type: String,
     /// Status of operation.  Must be populated if the transaction is in the past.  If submitting
     /// new transactions, it must NOT be populated.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     /// AccountIdentifier should be provided to point at which account the change is
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -266,7 +176,7 @@ pub struct Operation {
     pub amount: Option<Amount>,
     /// Operation specific metadata for any operation that's missing information it needs
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<OperationSpecificMetadata>,
+    pub metadata: Option<OperationMetadata>,
 }
 
 impl Operation {
@@ -276,14 +186,12 @@ impl Operation {
         status: Option<OperationStatusType>,
         address: AccountAddress,
         amount: Option<Amount>,
-        metadata: Option<OperationSpecificMetadata>,
+        metadata: Option<OperationMetadata>,
     ) -> Operation {
         Operation {
             operation_identifier: OperationIdentifier {
                 index: operation_index,
-                network_index: None,
             },
-            related_operations: None,
             operation_type: operation_type.to_string(),
             status: status.map(|inner| inner.to_string()),
             account: Some(address.into()),
@@ -304,7 +212,7 @@ impl Operation {
             status,
             address,
             None,
-            Some(OperationSpecificMetadata::create_account(sender)),
+            Some(OperationMetadata::create_account(sender)),
         )
     }
 
@@ -374,61 +282,61 @@ impl Operation {
         operator: AccountAddress,
     ) -> Operation {
         Operation::new(
-            OperationType::Withdraw,
+            OperationType::SetOperator,
             operation_index,
             status,
             address,
             None,
-            Some(OperationSpecificMetadata::set_operator(operator)),
+            Some(OperationMetadata::set_operator(operator)),
         )
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum OperationSpecificMetadata {
-    CreateAccount(CreateAccountArguments),
-    SetOperator(SetOperatorArguments),
-}
-
-impl OperationSpecificMetadata {
-    pub fn create_account(sender: AccountAddress) -> OperationSpecificMetadata {
-        OperationSpecificMetadata::CreateAccount(CreateAccountArguments {
-            sender: sender.into(),
-        })
-    }
-
-    pub fn set_operator(operator: AccountAddress) -> OperationSpecificMetadata {
-        OperationSpecificMetadata::SetOperator(SetOperatorArguments {
-            operator: operator.into(),
-        })
+impl std::cmp::PartialOrd for Operation {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CreateAccountArguments {
-    /// Sender for operations that affect accounts other than the sender
-    pub sender: AccountIdentifier,
+impl std::cmp::Ord for Operation {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let self_op =
+            OperationType::from_str(&self.operation_type).expect("Expect type to be valid");
+        let other_op =
+            OperationType::from_str(&other.operation_type).expect("Expect type to be valid");
+        match self_op.cmp(&other_op) {
+            Ordering::Equal => self
+                .operation_identifier
+                .index
+                .cmp(&other.operation_identifier.index),
+            order => order,
+        }
+    }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SetOperatorArguments {
-    operator: AccountIdentifier,
+/// This object is needed for flattening all the types into a
+/// single json object used by Rosetta
+#[derive(Clone, Default, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OperationMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender: Option<AccountIdentifier>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator: Option<AccountIdentifier>,
 }
 
-/// Used for query operations to apply conditions.  Defaults to [`Operator::And`] if no value is
-/// present
-///
-/// [API Spec](https://www.rosetta-api.org/docs/models/Operator.html)
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Operator {
-    And,
-    Or,
-}
+impl OperationMetadata {
+    pub fn create_account(sender: AccountAddress) -> Self {
+        OperationMetadata {
+            sender: Some(sender.into()),
+            ..Default::default()
+        }
+    }
 
-impl Default for Operator {
-    fn default() -> Self {
-        Operator::And
+    pub fn set_operator(operator: AccountAddress) -> Self {
+        OperationMetadata {
+            operator: Some(operator.into()),
+            ..Default::default()
+        }
     }
 }
 
@@ -469,21 +377,6 @@ impl TryFrom<PublicKey> for Ed25519PublicKey {
     }
 }
 
-/// Related Transaction allows for connecting related transactions across shards, networks or
-/// other boundaries.
-///
-/// [API Spec](https://www.rosetta-api.org/docs/models/RelatedTransaction.html)
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RelatedTransaction {
-    /// Network of transaction.  [`None`] means same network as original transaction
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub network_identifier: Option<NetworkIdentifier>,
-    /// Transaction identifier of the related transaction
-    pub transaction_identifier: TransactionIdentifier,
-    /// Direction of the relation (forward or backward in time)
-    pub direction: Direction,
-}
-
 /// Signature containing the signed payload and the encoded signed payload
 ///
 /// [API Spec](https://www.rosetta-api.org/docs/models/Signature.html)
@@ -506,12 +399,7 @@ pub struct Signature {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignatureType {
-    Ecdsa,
-    EcdsaRecovery,
     Ed25519,
-    #[serde(rename = "schnoor_1")]
-    Schnoor1,
-    SchnoorPoseidon,
 }
 
 /// Signing payload should be signed by the client with their own private key
@@ -519,16 +407,11 @@ pub enum SignatureType {
 /// [API Spec](https://www.rosetta-api.org/docs/models/SigningPayload.html)
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SigningPayload {
-    /// Deprecated field, replaced with account_identifier
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub address: Option<String>,
     /// Account identifier of the signer
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub account_identifier: Option<AccountIdentifier>,
+    pub account_identifier: AccountIdentifier,
     /// Hex encoded string of payload bytes to be signed
     pub hex_bytes: String,
     /// Signature type to sign with
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub signature_type: Option<SignatureType>,
 }
 
@@ -541,17 +424,15 @@ pub struct Transaction {
     pub transaction_identifier: TransactionIdentifier,
     /// Individual operations (write set changes) in a transaction
     pub operations: Vec<Operation>,
-    /// Related transactions
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub related_transactions: Option<Vec<RelatedTransaction>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<TransactionMetadata>,
+    pub metadata: TransactionMetadata,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TransactionMetadata {
     pub transaction_type: TransactionType,
     pub version: U64,
+    pub failed: bool,
+    pub vm_status: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -624,6 +505,13 @@ impl Transaction {
             }
         };
 
+        // Reorder operations by type so that there's no invalid ordering
+        // (Create before transfer) (Withdraw before deposit)
+        operations.sort();
+        for (i, operation) in operations.iter_mut().enumerate() {
+            operation.operation_identifier.index = i as u64;
+        }
+
         // Everything committed costs gas
         if let Some(ref request) = maybe_user_transaction_request {
             operations.push(Operation::gas_fee(
@@ -637,11 +525,12 @@ impl Transaction {
         Ok(Transaction {
             transaction_identifier: (&txn_info).into(),
             operations,
-            related_transactions: None,
-            metadata: Some(TransactionMetadata {
+            metadata: TransactionMetadata {
                 transaction_type: txn_type,
                 version: txn_info.version,
-            }),
+                failed: !txn_info.success,
+                vm_status: txn_info.vm_status,
+            },
         })
     }
 }
@@ -672,9 +561,10 @@ fn parse_operations_from_txn_payload(
                     && module.0 == aptos_coin_module_identifier()
                     && name.0 == aptos_coin_resource_identifier()
                 {
-                    let receiver =
-                        serde_json::from_value::<Address>(inner.arguments.get(0).cloned().unwrap())
-                            .unwrap();
+                    let receiver = serde_json::from_value::<Address>(
+                        inner.arguments.first().cloned().unwrap(),
+                    )
+                    .unwrap();
                     let amount =
                         serde_json::from_value::<U64>(inner.arguments.get(1).cloned().unwrap())
                             .unwrap()
@@ -700,7 +590,7 @@ fn parse_operations_from_txn_payload(
             && create_account_function_identifier() == inner.function.name.0
         {
             let address =
-                serde_json::from_value::<Address>(inner.arguments.get(0).cloned().unwrap())
+                serde_json::from_value::<Address>(inner.arguments.first().cloned().unwrap())
                     .unwrap();
             operations.push(Operation::create_account(
                 operation_index,
@@ -713,7 +603,7 @@ fn parse_operations_from_txn_payload(
             && set_operator_function_identifier() == inner.function.name.0
         {
             let operator =
-                serde_json::from_value::<Address>(inner.arguments.get(0).cloned().unwrap())
+                serde_json::from_value::<Address>(inner.arguments.first().cloned().unwrap())
                     .unwrap();
             operations.push(Operation::set_operator(
                 operation_index,
@@ -780,8 +670,7 @@ fn parse_operations_from_write_set(
                 }
             }
         } else if data.typ == stake_pool_tag {
-            // Account sequence number increase (possibly creation)
-            // Find out if it's the 0th sequence number (creation)
+            // Find set operator events
             for (id, value) in data.data.0.iter() {
                 if id.0 == set_operator_events_field_identifier() {
                     serde_json::from_value::<EventId>(value.clone()).unwrap();
@@ -902,9 +791,10 @@ impl InternalOperation {
                     match OperationType::from_str(&operation.operation_type) {
                         Ok(OperationType::CreateAccount) => {
                             if let (
-                                Some(OperationSpecificMetadata::CreateAccount(
-                                    CreateAccountArguments { sender },
-                                )),
+                                Some(OperationMetadata {
+                                    sender: Some(sender),
+                                    ..
+                                }),
                                 Some(account),
                             ) = (&operation.metadata, &operation.account)
                             {
@@ -916,9 +806,10 @@ impl InternalOperation {
                         }
                         Ok(OperationType::SetOperator) => {
                             if let (
-                                Some(OperationSpecificMetadata::SetOperator(
-                                    SetOperatorArguments { operator },
-                                )),
+                                Some(OperationMetadata {
+                                    operator: Some(operator),
+                                    ..
+                                }),
                                 Some(account),
                             ) = (&operation.metadata, &operation.account)
                             {
@@ -933,10 +824,16 @@ impl InternalOperation {
                 }
 
                 // Return invalid operations if for any reason parsing fails
-                Err(ApiError::InvalidOperations)
+                Err(ApiError::InvalidOperations(Some(format!(
+                    "Unrecognized single operation {:?}",
+                    operations
+                ))))
             }
             2 => Ok(Self::Transfer(Transfer::extract_transfer(operations)?)),
-            _ => Err(ApiError::InvalidOperations),
+            _ => Err(ApiError::InvalidOperations(Some(format!(
+                "Unrecognized operation combination {:?}",
+                operations
+            )))),
         }
     }
 
@@ -947,6 +844,28 @@ impl InternalOperation {
             Self::Transfer(inner) => inner.sender,
             Self::SetOperator(inner) => inner.owner,
         }
+    }
+
+    pub fn payload(
+        &self,
+    ) -> ApiResult<(aptos_types::transaction::TransactionPayload, AccountAddress)> {
+        Ok(match self {
+            InternalOperation::CreateAccount(create_account) => (
+                aptos_stdlib::aptos_account_create_account(create_account.new_account),
+                create_account.sender,
+            ),
+            InternalOperation::Transfer(transfer) => {
+                is_native_coin(&transfer.currency)?;
+                (
+                    aptos_stdlib::aptos_account_transfer(transfer.receiver, transfer.amount.0),
+                    transfer.sender,
+                )
+            }
+            InternalOperation::SetOperator(set_operator) => (
+                aptos_stdlib::stake_set_operator(set_operator.operator),
+                set_operator.owner,
+            ),
+        })
     }
 }
 
@@ -962,7 +881,7 @@ pub struct CreateAccount {
 pub struct Transfer {
     pub sender: AccountAddress,
     pub receiver: AccountAddress,
-    pub amount: u64,
+    pub amount: U64,
     pub currency: Currency,
 }
 
@@ -1051,7 +970,7 @@ impl Transfer {
         Ok(Transfer {
             sender,
             receiver,
-            amount,
+            amount: amount.into(),
             currency,
         })
     }
@@ -1071,8 +990,6 @@ pub struct CoinEvent {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct SetOperatorEvent {
-    _pool_address: Address,
-    _old_operator: Address,
     new_operator: Address,
 }
 

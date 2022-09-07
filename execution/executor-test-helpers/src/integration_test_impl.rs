@@ -8,7 +8,6 @@ use aptos_sdk::{
     types::{AccountKey, LocalAccount},
 };
 use aptos_state_view::account_with_state_view::{AccountWithStateView, AsAccountWithStateView};
-use aptos_transaction_builder::aptos_stdlib;
 use aptos_types::{
     account_config::aptos_test_root_address,
     account_view::AccountView,
@@ -25,6 +24,7 @@ use aptos_types::{
 };
 use aptos_vm::AptosVM;
 use aptosdb::AptosDB;
+use cached_packages::aptos_stdlib;
 use consensus_types::block::Block;
 use executor::block_executor::BlockExecutor;
 use executor_types::BlockExecutorTrait;
@@ -421,7 +421,7 @@ pub fn test_execution_with_storage_impl() -> Arc<AptosDB> {
     let account1_sent_events_batch1 = db
         .reader
         .get_events(
-            &EventKey::new(2, account1.address()),
+            &EventKey::new(3, account1.address()),
             0,
             Order::Ascending,
             10,
@@ -433,7 +433,7 @@ pub fn test_execution_with_storage_impl() -> Arc<AptosDB> {
     let account1_sent_events_batch2 = db
         .reader
         .get_events(
-            &EventKey::new(2, account1.address()),
+            &EventKey::new(3, account1.address()),
             10,
             Order::Ascending,
             10,
@@ -445,7 +445,7 @@ pub fn test_execution_with_storage_impl() -> Arc<AptosDB> {
     let account3_received_events_batch1 = db
         .reader
         .get_events(
-            &EventKey::new(1, account3.address()),
+            &EventKey::new(2, account3.address()),
             u64::MAX,
             Order::Descending,
             10,
@@ -462,7 +462,7 @@ pub fn test_execution_with_storage_impl() -> Arc<AptosDB> {
     let account3_received_events_batch2 = db
         .reader
         .get_events(
-            &EventKey::new(1, account3.address()),
+            &EventKey::new(2, account3.address()),
             6,
             Order::Descending,
             10,

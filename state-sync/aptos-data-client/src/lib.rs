@@ -11,10 +11,8 @@ use aptos_types::{
 use async_trait::async_trait;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::fmt::Display;
-use storage_service_types::responses::CompleteDataRange;
-use storage_service_types::Epoch;
+use std::{fmt, fmt::Display};
+use storage_service_types::{responses::CompleteDataRange, Epoch};
 use thiserror::Error;
 
 pub type ResponseId = u64;
@@ -25,7 +23,7 @@ pub type Result<T, E = Error> = ::std::result::Result<T, E>;
 
 // TODO(philiphayes): a Error { kind: ErrorKind, inner: BoxError } would be more convenient
 /// An error returned by the Aptos Data Client for failed API calls.
-#[derive(Clone, Debug, Deserialize, Error, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Error, PartialEq, Eq, Serialize)]
 pub enum Error {
     #[error("The requested data is unavailable and cannot be found! Error: {0}")]
     DataIsUnavailable(String),
@@ -145,7 +143,7 @@ pub trait AptosDataClient {
 
 /// A response error that users of the Aptos Data Client can use to notify
 /// the Data Client about invalid or malformed responses.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum ResponseError {
     InvalidData,
     InvalidPayloadDataType,
@@ -163,7 +161,7 @@ pub enum ResponseError {
 /// This trait provides a simple feedback mechanism for users of the Data Client
 /// to alert it to bad responses so that the peers responsible for providing this
 /// data can be penalized.
-pub trait ResponseCallback: fmt::Debug + Send + 'static {
+pub trait ResponseCallback: fmt::Debug + Send + Sync + 'static {
     // TODO(philiphayes): ideally this would take a `self: Box<Self>`, i.e.,
     // consume the callback, which better communicates that you should only report
     // an error once. however, the current state-sync-v2 code makes this difficult...
@@ -212,7 +210,7 @@ impl<T> Response<T> {
 }
 
 /// The different data client response payloads as an enum.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum ResponsePayload {
     EpochEndingLedgerInfos(Vec<LedgerInfoWithSignatures>),
     NewTransactionOutputsWithProof((TransactionOutputListWithProof, LedgerInfoWithSignatures)),

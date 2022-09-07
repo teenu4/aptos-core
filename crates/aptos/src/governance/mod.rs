@@ -2,38 +2,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::common::types::{
-    CliError, CliTypedResult, PoolAddressArgs, PromptOptions, TransactionOptions,
+    CliError, CliTypedResult, MovePackageDir, PoolAddressArgs, PromptOptions, TransactionOptions,
     TransactionSummary,
 };
 use crate::common::utils::prompt_yes_with_override;
-use crate::move_tool::{compile_move, init_move_dir, ArgWithType, FunctionArgType};
+#[cfg(feature = "no-upload-proposal")]
+use crate::common::utils::read_from_file;
+use crate::move_tool::{init_move_dir, IncludedArtifacts};
 use crate::{CliCommand, CliResult};
 use aptos_crypto::HashValue;
 use aptos_logger::warn;
 use aptos_rest_client::aptos_api_types::U64;
-use aptos_rest_client::{aptos_api_types::MoveType, Transaction};
+use aptos_rest_client::Transaction;
 use aptos_types::{
     account_address::AccountAddress,
     transaction::{Script, TransactionPayload},
 };
 use async_trait::async_trait;
+use cached_packages::aptos_stdlib;
 use clap::Parser;
-use move_deps::{
-    move_compiler::compiled_unit::CompiledUnitEnum,
-    move_core_types::{language_storage::TypeTag, transaction_argument::TransactionArgument},
-    move_package::BuildConfig,
-};
+use framework::{BuildOptions, BuiltPackage, ReleasePackage};
+use move_deps::move_core_types::transaction_argument::TransactionArgument;
 use reqwest::Url;
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::Path;
-use std::{
-    collections::BTreeMap,
-    convert::{TryFrom, TryInto},
-    fmt::Formatter,
-    fs,
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, fmt::Formatter, fs, path::PathBuf};
 use tempfile::TempDir;
 
 /// Tool for on-chain governance
@@ -46,6 +40,7 @@ pub enum GovernanceTool {
     Propose(SubmitProposal),
     Vote(SubmitVote),
     ExecuteProposal(ExecuteProposal),
+    GenerateUpgradeProposal(GenerateUpgradeProposal),
 }
 
 impl GovernanceTool {
@@ -55,6 +50,7 @@ impl GovernanceTool {
             Propose(tool) => tool.execute_serialized().await,
             Vote(tool) => tool.execute_serialized().await,
             ExecuteProposal(tool) => tool.execute_serialized().await,
+            GenerateUpgradeProposal(tool) => tool.execute_serialized_success().await,
         }
     }
 }
@@ -62,9 +58,14 @@ impl GovernanceTool {
 /// Submit proposal to other validators to be proposed on
 #[derive(Parser)]
 pub struct SubmitProposal {
-    /// Code location of the script to be voted on
-    #[clap(long)]
+    /// Location of the JSON metadata of the proposal
+    #[clap(long, group = "proposal-metadata")]
     pub(crate) metadata_url: Url,
+
+    #[cfg(feature = "no-upload-proposal")]
+    /// A JSON file to be uploaded later at the metadata URL
+    #[clap(long, group = "proposal-metadata")]
+    pub(crate) metadata_path: Option<PathBuf>,
 
     #[clap(flatten)]
     pub(crate) txn_options: TransactionOptions,
@@ -81,10 +82,12 @@ impl CliCommand<ProposalSubmissionSummary> for SubmitProposal {
     }
 
     async fn execute(mut self) -> CliTypedResult<ProposalSubmissionSummary> {
-        let (_bytecode, script_hash) = self.compile_proposal_args.compile()?;
+        let (_bytecode, script_hash) = self
+            .compile_proposal_args
+            .compile(self.txn_options.prompt_options)?;
 
         // Validate the proposal metadata
-        let (metadata, metadata_hash) = get_metadata(self.metadata_url.clone()).await?;
+        let (metadata, metadata_hash) = self.get_metadata().await?;
 
         println!(
             "{}\n\tMetadata Hash: {}\n\tScript Hash: {}",
@@ -92,25 +95,22 @@ impl CliCommand<ProposalSubmissionSummary> for SubmitProposal {
         );
         prompt_yes_with_override(
             "Do you want to submit this proposal?",
-            self.compile_proposal_args.prompt_options,
+            self.txn_options.prompt_options,
         )?;
 
         let txn = self
             .txn_options
-            .submit_entry_function(
-                AccountAddress::ONE,
-                "aptos_governance",
-                "create_proposal",
-                vec![],
-                vec![
-                    bcs::to_bytes(&self.pool_address_args.pool_address)?,
-                    bcs::to_bytes(&script_hash)?,
-                    bcs::to_bytes(&self.metadata_url.to_string())?,
-                    bcs::to_bytes(&metadata_hash.to_hex())?,
-                ],
+            .submit_transaction(
+                aptos_stdlib::aptos_governance_create_proposal(
+                    self.pool_address_args.pool_address,
+                    script_hash.to_vec(),
+                    self.metadata_url.to_string().as_bytes().to_vec(),
+                    metadata_hash.to_hex().as_bytes().to_vec(),
+                ),
+                None,
             )
             .await?;
-
+        let txn_summary = TransactionSummary::from(&txn);
         if let Transaction::UserTransaction(inner) = txn {
             // Find event with proposal id
             let proposal_id = if let Some(event) = inner.events.into_iter().find(|event| {
@@ -127,17 +127,10 @@ impl CliCommand<ProposalSubmissionSummary> for SubmitProposal {
                 warn!("No proposal event found to find proposal id");
                 None
             };
-            let request = inner.request;
-            let info = inner.info;
 
             return Ok(ProposalSubmissionSummary {
                 proposal_id,
-                transaction_hash: info.hash.into(),
-                transaction_version: info.version.into(),
-                gas_used: info.gas_used.0,
-                gas_price_per_unit: request.gas_unit_price.0,
-                sequence_number: request.sequence_number.0,
-                vm_status: info.vm_status,
+                transaction: txn_summary,
             });
         }
         Err(CliError::UnexpectedError(
@@ -146,29 +139,47 @@ impl CliCommand<ProposalSubmissionSummary> for SubmitProposal {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct CreateProposalEvent {
-    proposal_id: U64,
+impl SubmitProposal {
+    /// Retrieve metadata and validate it
+    async fn get_metadata(&self) -> CliTypedResult<(ProposalMetadata, HashValue)> {
+        #[cfg(feature = "no-upload-proposal")]
+        let bytes = if let Some(ref path) = self.metadata_path {
+            read_from_file(path)?
+        } else {
+            get_metadata_from_url(&self.metadata_url).await?
+        };
+        #[cfg(not(feature = "no-upload-proposal"))]
+        let bytes = get_metadata_from_url(&self.metadata_url).await?;
+
+        let metadata: ProposalMetadata = serde_json::from_slice(&bytes).map_err(|err| {
+            CliError::CommandArgumentError(format!(
+                "Metadata is not in a proper JSON format: {}",
+                err
+            ))
+        })?;
+        Url::parse(&metadata.source_code_url).map_err(|err| {
+            CliError::CommandArgumentError(format!(
+                "Source code URL {} is invalid {}",
+                metadata.source_code_url, err
+            ))
+        })?;
+        Url::parse(&metadata.discussion_url).map_err(|err| {
+            CliError::CommandArgumentError(format!(
+                "Discussion URL {} is invalid {}",
+                metadata.discussion_url, err
+            ))
+        })?;
+        let metadata_hash = HashValue::sha3_256_of(&bytes);
+        Ok((metadata, metadata_hash))
+    }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct ProposalSubmissionSummary {
-    proposal_id: Option<u64>,
-    transaction_hash: HashValue,
-    transaction_version: u64,
-    gas_used: u64,
-    gas_price_per_unit: u64,
-    sequence_number: u64,
-    vm_status: String,
-}
-
-/// Retrieve metadata and validate it
-async fn get_metadata(metadata_url: Url) -> CliTypedResult<(ProposalMetadata, HashValue)> {
+async fn get_metadata_from_url(metadata_url: &Url) -> CliTypedResult<Vec<u8>> {
     let client = reqwest::ClientBuilder::default()
         .tls_built_in_root_certs(true)
         .build()
         .map_err(|err| CliError::UnexpectedError(format!("Failed to build HTTP client {}", err)))?;
-    let bytes = client
+    client
         .get(metadata_url.clone())
         .send()
         .await
@@ -180,29 +191,25 @@ async fn get_metadata(metadata_url: Url) -> CliTypedResult<(ProposalMetadata, Ha
         })?
         .bytes()
         .await
+        .map(|b| b.to_vec())
         .map_err(|err| {
             CliError::CommandArgumentError(format!(
                 "Failed to fetch metadata url {}: {}",
                 metadata_url, err
             ))
-        })?;
-    let metadata: ProposalMetadata = serde_json::from_slice(&bytes).map_err(|err| {
-        CliError::CommandArgumentError(format!("Metadata is not in a proper JSON format: {}", err))
-    })?;
-    Url::parse(&metadata.source_code_url).map_err(|err| {
-        CliError::CommandArgumentError(format!(
-            "Source code URL {} is invalid {}",
-            metadata.source_code_url, err
-        ))
-    })?;
-    Url::parse(&metadata.discussion_url).map_err(|err| {
-        CliError::CommandArgumentError(format!(
-            "Discussion URL {} is invalid {}",
-            metadata.discussion_url, err
-        ))
-    })?;
-    let metadata_hash = HashValue::sha3_256_of(&bytes);
-    Ok((metadata, metadata_hash))
+        })
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CreateProposalEvent {
+    proposal_id: U64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ProposalSubmissionSummary {
+    proposal_id: Option<u64>,
+    #[serde(flatten)]
+    transaction: TransactionSummary,
 }
 
 /// Submit a vote on a current proposal
@@ -221,20 +228,18 @@ pub struct SubmitVote {
     pub(crate) no: bool,
 
     #[clap(flatten)]
-    pub(crate) prompt_options: PromptOptions,
-    #[clap(flatten)]
     pub(crate) txn_options: TransactionOptions,
     #[clap(flatten)]
     pub(crate) pool_address_args: PoolAddressArgs,
 }
 
 #[async_trait]
-impl CliCommand<Transaction> for SubmitVote {
+impl CliCommand<TransactionSummary> for SubmitVote {
     fn command_name(&self) -> &'static str {
         "SubmitVote"
     }
 
-    async fn execute(mut self) -> CliTypedResult<Transaction> {
+    async fn execute(mut self) -> CliTypedResult<TransactionSummary> {
         let (vote_str, vote) = match (self.yes, self.no) {
             (true, false) => ("Yes", true),
             (false, true) => ("No", false),
@@ -249,22 +254,20 @@ impl CliCommand<Transaction> for SubmitVote {
 
         prompt_yes_with_override(
             &format!("Are you sure you want to vote {}", vote_str),
-            self.prompt_options,
+            self.txn_options.prompt_options,
         )?;
 
         self.txn_options
-            .submit_entry_function(
-                AccountAddress::ONE,
-                "aptos_governance",
-                "vote",
-                vec![],
-                vec![
-                    bcs::to_bytes(&self.pool_address_args.pool_address)?,
-                    bcs::to_bytes(&self.proposal_id)?,
-                    bcs::to_bytes(&vote)?,
-                ],
+            .submit_transaction(
+                aptos_stdlib::aptos_governance_vote(
+                    self.pool_address_args.pool_address,
+                    self.proposal_id,
+                    vote,
+                ),
+                None,
             )
             .await
+            .map(TransactionSummary::from)
     }
 }
 
@@ -288,7 +291,7 @@ impl std::fmt::Display for ProposalMetadata {
 
 fn compile_in_temp_dir(
     script_path: &Path,
-    git_revision: &str,
+    framework_rev: Option<String>,
     prompt_options: PromptOptions,
 ) -> CliTypedResult<(Vec<u8>, HashValue)> {
     // Make a temporary directory for compilation
@@ -301,9 +304,10 @@ fn compile_in_temp_dir(
     init_move_dir(
         package_dir,
         "Proposal",
-        git_revision,
+        framework_rev,
         BTreeMap::new(),
         prompt_options,
+        None,
     )?;
 
     // Insert the new script
@@ -330,15 +334,18 @@ fn compile_in_temp_dir(
 }
 
 fn compile_script(package_dir: &Path) -> CliTypedResult<(Vec<u8>, HashValue)> {
-    let build_config = BuildConfig {
-        additional_named_addresses: BTreeMap::new(),
-        generate_abis: false,
-        generate_docs: false,
-        ..Default::default()
+    let build_options = BuildOptions {
+        with_srcs: false,
+        with_abis: false,
+        with_source_maps: false,
+        with_error_map: false,
+        install_dir: None,
+        named_addresses: Default::default(),
     };
 
-    let compiled_package = compile_move(build_config, package_dir)?;
-    let scripts_count = compiled_package.scripts().count();
+    let pack = BuiltPackage::build(package_dir.to_path_buf(), build_options)?;
+
+    let scripts_count = pack.script_count();
 
     if scripts_count != 1 {
         return Err(CliError::UnexpectedError(format!(
@@ -348,88 +355,22 @@ fn compile_script(package_dir: &Path) -> CliTypedResult<(Vec<u8>, HashValue)> {
         )));
     }
 
-    let script = *compiled_package
-        .scripts()
-        .collect::<Vec<_>>()
-        .get(0)
-        .unwrap();
-
-    match script.unit {
-        CompiledUnitEnum::Script(ref s) => {
-            let mut bytes = vec![];
-
-            s.script
-                .serialize(&mut bytes)
-                .map_err(|err| CliError::UnexpectedError(format!("Unexpected error: {}", err)))?;
-            let hash = HashValue::sha3_256_of(bytes.as_slice());
-            Ok((bytes, hash))
-        }
-        CompiledUnitEnum::Module(_) => Err(CliError::UnexpectedError(
-            "You can only execute a script, a module is not supported.".to_string(),
-        )),
-    }
+    let bytes = pack.extract_script_code().pop().unwrap();
+    let hash = HashValue::sha3_256_of(bytes.as_slice());
+    Ok((bytes, hash))
 }
 
 /// Execute a proposal that has passed voting requirements
 #[derive(Parser)]
 pub struct ExecuteProposal {
-    /// Arguments combined with their type separated by spaces.
-    ///
-    /// Supported types [u8, u64, u128, bool, hex, string, address]
-    ///
-    /// Example: `address:0x1 bool:true u8:0`
-    #[clap(long, multiple_values = true)]
-    pub(crate) args: Vec<ArgWithType>,
-
-    /// TypeTag arguments separated by spaces.
-    ///
-    /// Example: `u8 u64 u128 bool address vector true false signer`
-    #[clap(long, multiple_values = true)]
-    pub(crate) type_args: Vec<MoveType>,
+    /// Proposal Id being executed
+    #[clap(long)]
+    pub(crate) proposal_id: u64,
 
     #[clap(flatten)]
     pub(crate) txn_options: TransactionOptions,
     #[clap(flatten)]
     pub(crate) compile_proposal_args: CompileProposalArgs,
-}
-
-impl TryFrom<&ArgWithType> for TransactionArgument {
-    type Error = CliError;
-
-    fn try_from(arg: &ArgWithType) -> Result<Self, Self::Error> {
-        let txn_arg = match arg._ty {
-            FunctionArgType::Address => TransactionArgument::Address(
-                bcs::from_bytes(&arg.arg)
-                    .map_err(|err| CliError::UnableToParse("address", err.to_string()))?,
-            ),
-            FunctionArgType::Bool => TransactionArgument::Bool(
-                bcs::from_bytes(&arg.arg)
-                    .map_err(|err| CliError::UnableToParse("bool", err.to_string()))?,
-            ),
-            FunctionArgType::Hex => TransactionArgument::U8Vector(
-                bcs::from_bytes(&arg.arg)
-                    .map_err(|err| CliError::UnableToParse("hex", err.to_string()))?,
-            ),
-            FunctionArgType::String => TransactionArgument::U8Vector(
-                bcs::from_bytes(&arg.arg)
-                    .map_err(|err| CliError::UnableToParse("string", err.to_string()))?,
-            ),
-            FunctionArgType::U128 => TransactionArgument::U128(
-                bcs::from_bytes(&arg.arg)
-                    .map_err(|err| CliError::UnableToParse("u128", err.to_string()))?,
-            ),
-            FunctionArgType::U64 => TransactionArgument::U64(
-                bcs::from_bytes(&arg.arg)
-                    .map_err(|err| CliError::UnableToParse("u64", err.to_string()))?,
-            ),
-            FunctionArgType::U8 => TransactionArgument::U8(
-                bcs::from_bytes(&arg.arg)
-                    .map_err(|err| CliError::UnableToParse("u8", err.to_string()))?,
-            ),
-        };
-
-        Ok(txn_arg)
-    }
 }
 
 #[async_trait]
@@ -439,29 +380,16 @@ impl CliCommand<TransactionSummary> for ExecuteProposal {
     }
 
     async fn execute(mut self) -> CliTypedResult<TransactionSummary> {
-        let (bytecode, _script_hash) = self.compile_proposal_args.compile()?;
+        let (bytecode, _script_hash) = self
+            .compile_proposal_args
+            .compile(self.txn_options.prompt_options)?;
         // TODO: Check hash so we don't do a failed roundtrip?
 
-        // TODO: Clean these up to be common with the run function in move
-        let args = self
-            .args
-            .iter()
-            .map(|arg_with_type| arg_with_type.try_into())
-            .collect::<Result<Vec<TransactionArgument>, CliError>>()?;
-
-        let mut type_args: Vec<TypeTag> = Vec::new();
-
-        // These TypeArgs are used for generics
-        for type_arg in self.type_args.into_iter() {
-            let type_tag = TypeTag::try_from(type_arg)
-                .map_err(|err| CliError::UnableToParse("--type-args", err.to_string()))?;
-            type_args.push(type_tag)
-        }
-
-        let txn = TransactionPayload::Script(Script::new(bytecode, type_args, args));
+        let args = vec![TransactionArgument::U64(self.proposal_id)];
+        let txn = TransactionPayload::Script(Script::new(bytecode, vec![], args));
 
         self.txn_options
-            .submit_transaction(txn)
+            .submit_transaction(txn, None)
             .await
             .map(TransactionSummary::from)
     }
@@ -474,16 +402,17 @@ pub struct CompileProposalArgs {
     #[clap(long, parse(from_os_str))]
     pub script_path: PathBuf,
 
-    /// Git hash or branch of the framework in aptos core
+    /// Git revision or branch for the Aptos framework
+    ///
+    /// If not provided, it won't be using the AptosFramework.  Keep in mind that this
+    /// will only build correctly without the framework git revision when doing a full
+    /// framework upgrade
     #[clap(long)]
-    pub framework_git_rev: String,
-
-    #[clap(flatten)]
-    pub prompt_options: PromptOptions,
+    pub(crate) framework_git_rev: Option<String>,
 }
 
 impl CompileProposalArgs {
-    fn compile(&self) -> CliTypedResult<(Vec<u8>, HashValue)> {
+    fn compile(&self, prompt_options: PromptOptions) -> CliTypedResult<(Vec<u8>, HashValue)> {
         // Check script file
         let script_path = self.script_path.as_path();
         if !self.script_path.exists() {
@@ -499,6 +428,53 @@ impl CompileProposalArgs {
         }
 
         // Compile script
-        compile_in_temp_dir(script_path, &self.framework_git_rev, self.prompt_options)
+        compile_in_temp_dir(script_path, self.framework_git_rev.clone(), prompt_options)
+    }
+}
+
+/// Generates a package upgrade proposal script.
+#[derive(Parser)]
+pub struct GenerateUpgradeProposal {
+    /// Address of the account which the proposal addresses.
+    #[clap(long, parse(try_from_str=crate::common::types::load_account_arg))]
+    pub(crate) account: AccountAddress,
+
+    /// Where to store the generated proposal
+    #[clap(long, parse(from_os_str), default_value = "proposal.move")]
+    pub(crate) output: PathBuf,
+
+    /// What artifacts to include in the package. This can be one of `none`, `sparse`, and
+    /// `all`. `none` is the most compact form and does not allow to reconstruct a source
+    /// package from chain; `sparse` is the minimal set of artifacts needed to reconstruct
+    /// a source package; `all` includes all available artifacts. The choice of included
+    /// artifacts heavily influences the size and therefore gas cost of publishing: `none`
+    /// is the size of bytecode alone; `sparse` is roughly 2 times as much; and `all` 3-4
+    /// as much.
+    #[clap(long, default_value_t = IncludedArtifacts::Sparse)]
+    pub(crate) included_artifacts: IncludedArtifacts,
+
+    #[clap(flatten)]
+    pub(crate) move_options: MovePackageDir,
+}
+
+#[async_trait]
+impl CliCommand<()> for GenerateUpgradeProposal {
+    fn command_name(&self) -> &'static str {
+        "GenerateUpgradeProposal"
+    }
+
+    async fn execute(self) -> CliTypedResult<()> {
+        let GenerateUpgradeProposal {
+            move_options,
+            account,
+            included_artifacts,
+            output,
+        } = self;
+        let package_path = move_options.get_package_path()?;
+        let options = included_artifacts.build_options(move_options.named_addresses());
+        let package = BuiltPackage::build(package_path, options)?;
+        let release = ReleasePackage::new(package)?;
+        release.generate_script_proposal(account, output)?;
+        Ok(())
     }
 }

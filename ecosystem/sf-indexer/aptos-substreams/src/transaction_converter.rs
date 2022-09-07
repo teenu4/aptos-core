@@ -13,9 +13,9 @@ use aptos_protos::{
         signature::{Signature, Type as SignatureType},
         transaction::TransactionType,
         write_set_change::{Change as ChangeInput, Type as WriteSetChangeType},
-        BlockMetadataTransaction, Ed25519Signature, Event, GenesisTransaction, MoveResource,
-        MoveStructTag, MultiAgentSignature, MultiEd25519Signature, Transaction, TransactionInfo,
-        UserTransaction, UserTransactionRequest,
+        BlockMetadataTransaction, Ed25519Signature, Event, GenesisTransaction, MultiAgentSignature,
+        MultiEd25519Signature, Transaction, TransactionInfo, UserTransaction,
+        UserTransactionRequest,
     },
 };
 
@@ -29,8 +29,9 @@ pub fn get_transaction_info_output(
         hash: info.hash.clone(),
         r#type: get_transaction_type(txn.r#type()),
         version: txn.version,
-        state_root_hash: info.state_root_hash.clone(),
+        state_change_hash: info.state_change_hash.clone(),
         event_root_hash: info.event_root_hash.clone(),
+        state_checkpoint_hash: info.state_checkpoint_hash.clone(),
         gas_used: info.gas_used,
         success: info.success,
         epoch: txn.epoch,
@@ -110,6 +111,7 @@ pub fn get_events_output(
                 key,
                 sequence_number: event.sequence_number,
                 r#type: serde_json::to_string(&event.r#type).unwrap_or_default(),
+                type_str: event.type_str.clone(),
                 data: event.data.clone(),
             }
         })
@@ -197,7 +199,7 @@ fn parse_single_signature(
         public_key: s.public_key.clone(),
         signature: s.signature.clone(),
         threshold: 1,
-        bitmap: Vec::default(),
+        public_key_indices: Vec::default(),
         multi_agent_index,
         multi_sig_index: 0,
     }
@@ -216,17 +218,21 @@ fn parse_multi_signature(
     if let Some(addr) = override_address {
         signer = addr;
     }
-    for (index, key) in s.public_keys.iter().enumerate() {
-        let signature = s.signatures.get(index).unwrap();
+    for (index, signature) in s.signatures.iter().enumerate() {
+        let public_key = s
+            .public_keys
+            .get(s.public_key_indices.clone()[index] as usize)
+            .unwrap()
+            .clone();
         signatures.push(SignatureOutput {
             version: info.version,
             signer: signer.clone(),
             is_sender_primary,
             signature_type: get_signature_type(SignatureType::MultiEd25519),
-            public_key: key.clone(),
+            public_key,
             signature: signature.clone(),
             threshold: s.threshold,
-            bitmap: s.bitmap.clone(),
+            public_key_indices: s.public_key_indices.clone(),
             multi_agent_index,
             multi_sig_index: index as u32,
         });
@@ -318,30 +324,20 @@ fn get_change_output(change: &ChangeInput, index: u64) -> ChangeOutput {
                 .unwrap_or_default()
                 .abi
                 .unwrap_or_default();
-            let friends = match abi
-                .friends
-                .iter()
-                .map(|module_id| serde_json::to_string(module_id))
-                .collect()
-            {
+            let friends = match abi.friends.iter().map(serde_json::to_string).collect() {
                 Ok(res) => res,
                 _ => Vec::default(),
             };
             let exposed_functions = match abi
                 .exposed_functions
                 .iter()
-                .map(|module_id| serde_json::to_string(module_id))
+                .map(serde_json::to_string)
                 .collect()
             {
                 Ok(res) => res,
                 _ => Vec::default(),
             };
-            let structs = match abi
-                .structs
-                .iter()
-                .map(|module_id| serde_json::to_string(module_id))
-                .collect()
-            {
+            let structs = match abi.structs.iter().map(serde_json::to_string).collect() {
                 Ok(res) => res,
                 _ => Vec::default(),
             };
@@ -358,29 +354,35 @@ fn get_change_output(change: &ChangeInput, index: u64) -> ChangeOutput {
         }
         ChangeInput::DeleteResource(item) => ChangeOutput::MoveResource(MoveResourceOutput {
             address: item.address.clone(),
-            name: item.resource.clone().unwrap_or_default().name,
-            module: item.resource.clone().unwrap_or_default().module,
+            type_str: item.type_str.clone(),
+            name: item
+                .r#type
+                .as_ref()
+                .map(|a| a.name.clone())
+                .unwrap_or_default(),
+            module: item
+                .r#type
+                .as_ref()
+                .map(|a| a.module.clone())
+                .unwrap_or_default(),
             generic_type_params: Vec::default(),
             data: String::default(),
             is_deleted: true,
             wsc_index: index,
         }),
         ChangeInput::WriteResource(item) => {
-            let data = item.data.clone().unwrap_or(MoveResource {
-                r#type: Some(MoveStructTag::default()),
-                data: String::default(),
-            });
-            let struct_tag = data.r#type.clone().unwrap_or_default();
+            let struct_tag = item.r#type.clone().unwrap_or_default();
             ChangeOutput::MoveResource(MoveResourceOutput {
                 address: item.address.clone(),
-                name: struct_tag.name,
-                module: struct_tag.module,
+                module: struct_tag.module.clone(),
+                type_str: item.type_str.clone(),
+                name: struct_tag.name.clone(),
                 generic_type_params: struct_tag
                     .generic_type_params
                     .iter()
                     .map(|param| serde_json::to_string(param).unwrap_or_default())
                     .collect(),
-                data: data.data.clone(),
+                data: item.data.clone(),
                 is_deleted: false,
                 wsc_index: index,
             })

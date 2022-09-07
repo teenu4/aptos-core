@@ -24,7 +24,7 @@ use aptos_types::{
     },
 };
 use aptos_vm::{
-    data_cache::{AsMoveResolver, IntoMoveResolver, RemoteStorageOwned},
+    data_cache::{AsMoveResolver, IntoMoveResolver, StorageAdapterOwned},
     AptosVM,
 };
 use clap::StructOpt;
@@ -53,13 +53,13 @@ use move_deps::{
     move_vm_runtime::session::SerializedReturnValues,
 };
 use once_cell::sync::Lazy;
-use std::sync::Arc;
 use std::{
     collections::{BTreeMap, HashMap},
     convert::TryFrom,
     fmt,
     path::Path,
     string::String,
+    sync::Arc,
 };
 use vm_genesis::GENESIS_KEYPAIR;
 /**
@@ -74,7 +74,7 @@ use vm_genesis::GENESIS_KEYPAIR;
 ///   - It executes transactions through AptosVM, instead of MoveVM directly
 struct AptosTestAdapter<'a> {
     compiled_state: CompiledState<'a>,
-    storage: RemoteStorageOwned<FakeDataStore>,
+    storage: StorageAdapterOwned<FakeDataStore>,
     default_syntax: SyntaxChoice,
     private_key_mapping: BTreeMap<String, Ed25519PrivateKey>,
 }
@@ -167,7 +167,7 @@ struct BlockCommand {
 #[derive(StructOpt, Debug)]
 struct ViewTableCommand {
     #[structopt(long = "table_handle")]
-    table_handle: u128,
+    table_handle: AccountAddress,
 
     #[structopt(long = "key_type", parse(try_from_str = parse_type_tag))]
     key_type: TypeTag,
@@ -501,7 +501,7 @@ impl<'a> AptosTestAdapter<'a> {
         let txn = RawTransaction::new(
             aptos_test_root_address(),
             parameters.sequence_number,
-            aptos_transaction_builder::aptos_stdlib::account_create_account(account_addr),
+            cached_packages::aptos_stdlib::aptos_account_create_account(account_addr),
             parameters.max_gas_amount,
             parameters.gas_unit_price,
             parameters.expiration_timestamp_secs,
@@ -517,7 +517,7 @@ impl<'a> AptosTestAdapter<'a> {
         let txn = RawTransaction::new(
             aptos_test_root_address(),
             parameters.sequence_number + 1,
-            aptos_transaction_builder::aptos_stdlib::aptos_coin_mint(account_addr, amount),
+            cached_packages::aptos_stdlib::aptos_coin_mint(account_addr, amount),
             parameters.max_gas_amount,
             parameters.gas_unit_price,
             parameters.expiration_timestamp_secs,
@@ -947,5 +947,7 @@ fn render_events(events: &[ContractEvent]) -> Option<String> {
 }
 
 pub fn run_aptos_test(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // TODO: remove once bundles removed
+    aptos_vm::aptos_vm::allow_module_bundle_for_test();
     run_test_impl::<AptosTestAdapter>(path, Some(&*PRECOMPILED_APTOS_FRAMEWORK))
 }

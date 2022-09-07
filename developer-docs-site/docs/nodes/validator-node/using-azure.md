@@ -4,15 +4,20 @@ slug: "run-validator-node-using-azure"
 sidebar_position: 11
 ---
 
-## Run on AWS
+## Run on Azure
+
 This guide assumes you already have Azure account setup.
 
 Install pre-requisites if needed:
 
-   * Aptos CLI 0.3.1: https://github.com/aptos-labs/aptos-core/blob/main/crates/aptos/README.md
+   * Aptos CLI 0.3.1: https://aptos.dev/cli-tools/aptos-cli-tool/install-aptos-cli
    * Terraform 1.2.4: https://www.terraform.io/downloads.html
    * Kubernetes CLI: https://kubernetes.io/docs/tasks/tools/
    * Azure CLI: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli
+
+:::tip One validator node + one validator fullnode
+When you follow all the below instructions, you will run one validator node and one validator fullnode in the cluster. 
+:::
 
 1. Create a working directory for your configuration.
 

@@ -190,7 +190,7 @@ mod tests {
         }
         if let Some(entry_function) = EntryFunctionCall::decode(txn.payload()) {
             match entry_function {
-                EntryFunctionCall::AccountCreateAccount {
+                EntryFunctionCall::AptosAccountCreateAccount {
                     auth_key: address, ..
                 } => {
                     let mut writer = accounts.write();
@@ -241,7 +241,7 @@ mod tests {
         TransactionPayloadData::ModuleBundlePayload(ModuleBundlePayload { modules: vec![] })
     }
 
-    #[derive(Clone, Debug, Serialize, PartialEq)]
+    #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
     pub struct Error {
         pub code: u16,
         pub message: String,
@@ -513,7 +513,7 @@ mod tests {
         let address = AuthenticationKey::ed25519(&pub_key).derived_address();
         assert_eq!(
             address.to_string(),
-            "9FF98E82355EB13098F3B1157AC018A725C62C0E0820F422000814CDBA407835"
+            "9ff98e82355eb13098f3b1157ac018a725c62c0e0820f422000814cdba407835"
         );
         address
     }

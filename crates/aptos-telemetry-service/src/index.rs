@@ -1,7 +1,10 @@
 // Copyright (c) Aptos
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{auth, context::Context, custom_event, error::ServiceError};
+use crate::{
+    auth, context::Context, custom_event, error::ServiceError, log_ingest, prometheus_push_metrics,
+};
+use aptos_logger::debug;
 use std::convert::Infallible;
 use warp::{
     body::BodyDeserializeError,
@@ -12,8 +15,11 @@ use warp::{
 };
 pub fn routes(context: Context) -> impl Filter<Extract = impl Reply, Error = Infallible> + Clone {
     index(context.clone())
+        .or(auth::check_chain_access(context.clone()))
         .or(auth::auth(context.clone()))
-        .or(custom_event::custom_event(context))
+        .or(custom_event::custom_event(context.clone()))
+        .or(prometheus_push_metrics::metrics_ingest(context.clone()))
+        .or(log_ingest::log_ingest(context))
         .recover(handle_rejection)
 }
 
@@ -62,6 +68,8 @@ pub async fn handle_rejection(err: Rejection) -> std::result::Result<impl Reply,
             format!("unexpected error: {:?}", err),
         ));
     }
+
+    debug!("returning an error with status code {}: {:?}", code, err);
 
     Ok(reply::with_status(body, code).into_response())
 }

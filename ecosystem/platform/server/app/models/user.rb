@@ -18,6 +18,7 @@ class User < ApplicationRecord
                        format: { with: User::USERNAME_REGEX }, allow_nil: true
   validate :email_is_unique
   validates :email, format: { with: URI::MailTo::EMAIL_REGEXP }, allow_nil: true
+  validates :bio, length: { maximum: 160 }, allow_nil: true, allow_blank: true
 
   validate_aptos_address :mainnet_address
 
@@ -32,6 +33,9 @@ class User < ApplicationRecord
   has_many :projects
   has_many :notifications, as: :recipient, dependent: :destroy
   has_many :notification_preferences, dependent: :destroy
+  has_many :wallets, dependent: :destroy
+
+  has_one_attached :avatar
 
   before_save :maybe_enqueue_forum_sync
 
@@ -78,7 +82,6 @@ class User < ApplicationRecord
     return unless ait3_registration_complete?
 
     SendRegistrationCompleteEmailJob.perform_now({ user_id: id })
-    DiscourseAddGroupJob.perform_later({ user_id: id, group_name: 'ait3_eligible' })
   end
 
   def ait3_registration_complete?

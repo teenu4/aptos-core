@@ -160,7 +160,8 @@ StructTag:
         SEQ:
           TYPENAME: TypeTag
 TableHandle:
-  NEWTYPESTRUCT: U128
+  NEWTYPESTRUCT:
+    TYPENAME: AccountAddress
 Transaction:
   ENUM:
     0:
@@ -282,10 +283,11 @@ WriteSet:
 WriteSetMut:
   STRUCT:
     - write_set:
-        SEQ:
-          TUPLE:
-            - TYPENAME: StateKey
-            - TYPENAME: WriteOp
+        MAP:
+          KEY:
+            TYPENAME: StateKey
+          VALUE:
+            TYPENAME: WriteOp
 WriteSetPayload:
   ENUM:
     0:

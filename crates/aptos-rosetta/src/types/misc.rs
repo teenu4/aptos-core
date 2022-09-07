@@ -15,12 +15,9 @@ use std::{
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Error {
     /// Error code
-    pub code: u64,
+    pub code: u32,
     /// Message that always matches the error code
     pub message: String,
-    /// Possible generic information about an error code
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
     /// Whether a call can retry on the error
     pub retriable: bool,
     /// Specific details of the error e.g. stack trace
@@ -78,13 +75,16 @@ pub struct Version {
 }
 
 /// An internal enum to support Operation typing
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum OperationType {
+    // Create must always be first for ordering
     CreateAccount,
-    Deposit,
+    // Withdraw must come before deposit
     Withdraw,
-    Fee,
+    Deposit,
     SetOperator,
+    // Fee must always be last for ordering
+    Fee,
 }
 
 impl OperationType {
@@ -97,8 +97,8 @@ impl OperationType {
     pub fn all() -> Vec<OperationType> {
         vec![
             OperationType::CreateAccount,
-            OperationType::Deposit,
             OperationType::Withdraw,
+            OperationType::Deposit,
             OperationType::Fee,
             OperationType::SetOperator,
         ]

@@ -12,7 +12,8 @@ use aptos_crypto::{
     HashValue, PrivateKey, Uniform,
 };
 use aptos_gas::{
-    AptosGasParameters, InitialGasSchedule, NativeGasParameters, ToOnChainGasSchedule,
+    AbstractValueSizeGasParameters, AptosGasParameters, InitialGasSchedule, NativeGasParameters,
+    ToOnChainGasSchedule,
 };
 use aptos_types::account_config::aptos_test_root_address;
 use aptos_types::{
@@ -110,7 +111,11 @@ pub fn encode_genesis_change_set(
         state_view.add_module(&module.self_id(), module_bytes);
     }
     let data_cache = StateViewCache::new(&state_view).into_move_resolver();
-    let move_vm = MoveVmExt::new(NativeGasParameters::zeros()).unwrap();
+    let move_vm = MoveVmExt::new(
+        NativeGasParameters::zeros(),
+        AbstractValueSizeGasParameters::zeros(),
+    )
+    .unwrap();
     let id1 = HashValue::zero();
     let mut session = move_vm.new_session(&data_cache, SessionId::genesis(id1));
 
@@ -126,6 +131,7 @@ pub fn encode_genesis_change_set(
     if genesis_config.is_test {
         allow_core_resources_to_set_version(&mut session);
     }
+    set_genesis_end(&mut session);
 
     // Reconfiguration should happen after all on-chain invocations.
     emit_new_block_and_epoch_event(&mut session);
@@ -290,6 +296,16 @@ fn initialize_aptos_coin(session: &mut SessionExt<impl MoveResolver>) {
     );
 }
 
+fn set_genesis_end(session: &mut SessionExt<impl MoveResolver>) {
+    exec_function(
+        session,
+        GENESIS_MODULE_NAME,
+        "set_genesis_end",
+        vec![],
+        serialize_values(&vec![MoveValue::Signer(CORE_CODE_ADDRESS)]),
+    );
+}
+
 fn initialize_core_resources_and_aptos_coin(
     session: &mut SessionExt<impl MoveResolver>,
     core_resources_key: &Ed25519PublicKey,
@@ -365,7 +381,7 @@ fn publish_framework(session: &mut SessionExt<impl MoveResolver>, framework: &Re
 /// Publish the given package.
 fn publish_package(session: &mut SessionExt<impl MoveResolver>, pack: &ReleasePackage) {
     let modules = pack.sorted_code_and_modules();
-    let addr = *modules.get(0).unwrap().1.self_id().address();
+    let addr = *modules.first().unwrap().1.self_id().address();
     let code = modules
         .into_iter()
         .map(|(c, _)| c.to_vec())
@@ -615,7 +631,11 @@ pub fn test_genesis_module_publishing() {
     }
     let data_cache = StateViewCache::new(&state_view).into_move_resolver();
 
-    let move_vm = MoveVmExt::new(NativeGasParameters::zeros()).unwrap();
+    let move_vm = MoveVmExt::new(
+        NativeGasParameters::zeros(),
+        AbstractValueSizeGasParameters::zeros(),
+    )
+    .unwrap();
     let id1 = HashValue::zero();
     let mut session = move_vm.new_session(&data_cache, SessionId::genesis(id1));
     publish_framework(&mut session, cached_packages::head_release_bundle());

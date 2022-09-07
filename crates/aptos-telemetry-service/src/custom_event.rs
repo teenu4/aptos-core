@@ -26,19 +26,26 @@ pub fn custom_event(context: Context) -> BoxedFilter<(impl Reply,)> {
         .and(context.clone().filter())
         .and(with_auth(
             context,
-            vec![PeerRole::Validator, PeerRole::Unknown],
+            vec![
+                PeerRole::Validator,
+                PeerRole::ValidatorFullNode,
+                PeerRole::Unknown,
+            ],
         ))
         .and(warp::body::json())
         .and_then(handle_custom_event)
         .boxed()
 }
 
-pub async fn handle_custom_event(
+pub(crate) async fn handle_custom_event(
     context: Context,
     claims: Claims,
     body: TelemetryDump,
 ) -> anyhow::Result<impl Reply, Rejection> {
-    if body.user_id != claims.peer_id.to_string() {
+    if !body
+        .user_id
+        .eq_ignore_ascii_case(&claims.peer_id.to_string())
+    {
         return Err(reject::custom(ServiceError::bad_request(format!(
             "user_id {} in event does not match peer_id {}",
             body.user_id, claims.peer_id
@@ -97,7 +104,7 @@ pub async fn handle_custom_event(
         .await
         .map_err(|e| {
             error!("unable to insert row into bigquery: {}", e);
-            return ServiceError::from(anyhow!("unable to insert row into bigquery"));
+            ServiceError::from(anyhow!("unable to insert row into bigquery"))
         })?;
 
     debug!("row inserted succeefully: {:?}", &row);

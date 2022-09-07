@@ -26,15 +26,18 @@ class HeaderComponent < ViewComponent::Base
     NavGroup.new(
       NavItem.new('#', 'Network', 'Aptos Network'),
       [
-        NavItem.new('https://explorer.devnet.aptos.dev/', 'Explorer', 'Aptos Explorer'),
-        NavItem.new('https://status.devnet.aptos.dev/', 'Network Status', 'Aptos Network Status')
+        NavItem.new('https://explorer.devnet.aptos.dev/', 'Explorer', 'Aptos Explorer')
       ]
     ),
     NavGroup.new(
       NavItem.new('#', 'About', 'About Aptos'),
       [
         NavItem.new('/currents', 'Currents', 'Aptos Currents'),
-        NavItem.new('/careers', 'Careers', 'Aptos Careers')
+        NavItem.new('/careers', 'Careers', 'Aptos Careers'),
+        NavItem.new(
+          'https://aptos.dev/aptos-white-paper/aptos-white-paper-index/',
+          'Whitepaper', 'Aptos Whitepaper'
+        )
       ]
     )
   ].freeze

@@ -21,11 +21,12 @@ module aptos_framework::aptos_governance {
     use aptos_std::simple_map::{Self, SimpleMap};
     use aptos_std::table::{Self, Table};
 
-    use aptos_framework::account::{SignerCapability, create_signer_with_capability};
+    use aptos_framework::account::{Self, SignerCapability, create_signer_with_capability};
     use aptos_framework::coin;
     use aptos_framework::governance_proposal::{Self, GovernanceProposal};
     use aptos_framework::reconfiguration;
     use aptos_framework::stake;
+    use aptos_framework::staking_config;
     use aptos_framework::system_addresses;
     use aptos_framework::aptos_coin::AptosCoin;
     use aptos_framework::timestamp;
@@ -127,7 +128,7 @@ module aptos_framework::aptos_governance {
         signer_address: address,
         signer_cap: SignerCapability,
     ) acquires GovernanceResponsbility {
-        system_addresses::assert_aptos_framework(aptos_framework);
+        system_addresses::assert_framework_reserved_address(aptos_framework);
 
         if (!exists<GovernanceResponsbility>(@aptos_framework)) {
             move_to(aptos_framework, GovernanceResponsbility{ signer_caps: simple_map::create<address, SignerCapability>() });
@@ -155,9 +156,9 @@ module aptos_framework::aptos_governance {
             required_proposer_stake,
         });
         move_to(aptos_framework, GovernanceEvents {
-            create_proposal_events: event::new_event_handle<CreateProposalEvent>(aptos_framework),
-            update_config_events: event::new_event_handle<UpdateConfigEvent>(aptos_framework),
-            vote_events: event::new_event_handle<VoteEvent>(aptos_framework),
+            create_proposal_events: account::new_event_handle<CreateProposalEvent>(aptos_framework),
+            update_config_events: account::new_event_handle<UpdateConfigEvent>(aptos_framework),
+            vote_events: account::new_event_handle<VoteEvent>(aptos_framework),
         });
         move_to(aptos_framework, VotingRecords {
             votes: table::new(),
@@ -220,7 +221,7 @@ module aptos_framework::aptos_governance {
 
         // The proposer's stake needs to be at least the required bond amount.
         let governance_config = borrow_global<GovernanceConfig>(@aptos_framework);
-        let stake_balance = stake::get_current_epoch_voting_power(stake_pool);
+        let stake_balance = get_voting_power(stake_pool);
         assert!(
             stake_balance >= governance_config.required_proposer_stake,
             error::invalid_argument(EINSUFFICIENT_PROPOSER_STAKE),
@@ -297,7 +298,7 @@ module aptos_framework::aptos_governance {
         // Voting power does not include pending_active or pending_inactive balances.
         // In general, the stake pool should not have pending_inactive balance if it still has lockup (required to vote)
         // And if pending_active will be added to active in the next epoch.
-        let voting_power = stake::get_current_epoch_voting_power(stake_pool);
+        let voting_power = get_voting_power(stake_pool);
         // Short-circuit if the voter has no voting power.
         assert!(voting_power > 0, error::invalid_argument(ENO_VOTING_POWER));
 
@@ -373,6 +374,20 @@ module aptos_framework::aptos_governance {
     public fun reconfigure(aptos_framework: &signer) {
         system_addresses::assert_aptos_framework(aptos_framework);
         reconfiguration::reconfigure();
+    }
+
+    /// Return the voting power a stake pool has with respect to governance proposals.
+    fun get_voting_power(pool_address: address): u64 {
+        let allow_validator_set_change = staking_config::get_allow_validator_set_change(&staking_config::get());
+        if (allow_validator_set_change) {
+            let (active, _, pending_active, pending_inactive) = stake::get_stake(pool_address);
+            // We calculate the voting power as total non-inactive stakes of the pool. Even if the validator is not in the
+            // active validator set, as long as they have a lockup (separately checked in create_proposal and voting), their
+            // stake would still count in their voting power for governance proposals.
+            active + pending_active + pending_inactive
+        } else {
+            stake::get_current_epoch_voting_power(pool_address)
+        }
     }
 
     /// Return a signer for making changes to 0x1 as part of on-chain governance proposal process.
@@ -528,8 +543,13 @@ module aptos_framework::aptos_governance {
         use aptos_framework::aptos_coin::{Self, AptosCoin};
 
         timestamp::set_time_has_started_for_testing(aptos_framework);
+        account::create_account_for_test(signer::address_of(aptos_framework));
+        account::create_account_for_test(signer::address_of(proposer));
+        account::create_account_for_test(signer::address_of(yes_voter));
+        account::create_account_for_test(signer::address_of(no_voter));
 
         // Initialize the governance.
+        staking_config::initialize_for_test(aptos_framework, 0, 1000, 2000, true, 0, 1, 100);
         initialize(aptos_framework, 10, 100, 1000);
         store_signer_cap(
             aptos_framework,
@@ -556,7 +576,9 @@ module aptos_framework::aptos_governance {
 
     #[test(aptos_framework = @aptos_framework)]
     public entry fun test_update_governance_config(
-        aptos_framework: signer) acquires GovernanceConfig, GovernanceEvents {
+        aptos_framework: signer,
+    ) acquires GovernanceConfig, GovernanceEvents {
+        account::create_account_for_test(signer::address_of(&aptos_framework));
         initialize(&aptos_framework, 1, 2, 3);
         update_governance_config(&aptos_framework, 10, 20, 30);
 

@@ -24,10 +24,10 @@ use aptos_config::config::NodeConfig;
 use aptos_crypto::{bls12381, x25519, ValidCryptoMaterialStringExt};
 use aptos_faucet::FaucetArgs;
 use aptos_genesis::config::{HostAndPort, OperatorConfiguration};
-use aptos_transaction_builder::aptos_stdlib;
 use aptos_types::chain_id::ChainId;
 use aptos_types::{account_address::AccountAddress, account_config::CORE_CODE_ADDRESS};
 use async_trait::async_trait;
+use cached_packages::aptos_stdlib;
 use clap::Parser;
 use hex::FromHex;
 use rand::rngs::StdRng;
@@ -270,13 +270,16 @@ impl CliCommand<TransactionSummary> for InitializeValidator {
             };
 
         self.txn_options
-            .submit_transaction(aptos_stdlib::stake_initialize_validator(
-                consensus_public_key.to_bytes().to_vec(),
-                consensus_proof_of_possession.to_bytes().to_vec(),
-                // BCS encode, so that we can hide the original type
-                bcs::to_bytes(&validator_network_addresses)?,
-                bcs::to_bytes(&full_node_network_addresses)?,
-            ))
+            .submit_transaction(
+                aptos_stdlib::stake_initialize_validator(
+                    consensus_public_key.to_bytes().to_vec(),
+                    consensus_proof_of_possession.to_bytes().to_vec(),
+                    // BCS encode, so that we can hide the original type
+                    bcs::to_bytes(&validator_network_addresses)?,
+                    bcs::to_bytes(&full_node_network_addresses)?,
+                ),
+                None,
+            )
             .await
             .map(|inner| inner.into())
     }
@@ -334,7 +337,7 @@ impl CliCommand<TransactionSummary> for JoinValidatorSet {
             .address_fallback_to_txn(&self.txn_options)?;
 
         self.txn_options
-            .submit_transaction(aptos_stdlib::stake_join_validator_set(address))
+            .submit_transaction(aptos_stdlib::stake_join_validator_set(address), None)
             .await
             .map(|inner| inner.into())
     }
@@ -361,7 +364,7 @@ impl CliCommand<TransactionSummary> for LeaveValidatorSet {
             .address_fallback_to_txn(&self.txn_options)?;
 
         self.txn_options
-            .submit_transaction(aptos_stdlib::stake_leave_validator_set(address))
+            .submit_transaction(aptos_stdlib::stake_leave_validator_set(address), None)
             .await
             .map(|inner| inner.into())
     }
@@ -644,11 +647,14 @@ impl CliCommand<TransactionSummary> for UpdateConsensusKey {
             .validator_consensus_key_args
             .get_consensus_proof_of_possession(&operator_config)?;
         self.txn_options
-            .submit_transaction(aptos_stdlib::stake_rotate_consensus_key(
-                address,
-                consensus_public_key.to_bytes().to_vec(),
-                consensus_proof_of_possession.to_bytes().to_vec(),
-            ))
+            .submit_transaction(
+                aptos_stdlib::stake_rotate_consensus_key(
+                    address,
+                    consensus_public_key.to_bytes().to_vec(),
+                    consensus_proof_of_possession.to_bytes().to_vec(),
+                ),
+                None,
+            )
             .await
             .map(|inner| inner.into())
     }
@@ -702,12 +708,15 @@ impl CliCommand<TransactionSummary> for UpdateValidatorNetworkAddresses {
             };
 
         self.txn_options
-            .submit_transaction(aptos_stdlib::stake_update_network_and_fullnode_addresses(
-                address,
-                // BCS encode, so that we can hide the original type
-                bcs::to_bytes(&validator_network_addresses)?,
-                bcs::to_bytes(&full_node_network_addresses)?,
-            ))
+            .submit_transaction(
+                aptos_stdlib::stake_update_network_and_fullnode_addresses(
+                    address,
+                    // BCS encode, so that we can hide the original type
+                    bcs::to_bytes(&validator_network_addresses)?,
+                    bcs::to_bytes(&full_node_network_addresses)?,
+                ),
+                None,
+            )
             .await
             .map(|inner| inner.into())
     }
@@ -717,12 +726,12 @@ impl CliCommand<TransactionSummary> for UpdateValidatorNetworkAddresses {
 #[derive(Parser)]
 pub struct AnalyzeValidatorPerformance {
     /// First epoch to analyze
-    #[clap(long)]
-    pub start_epoch: Option<u64>,
+    #[clap(long, default_value = "-2")]
+    pub start_epoch: i64,
 
     /// Last epoch to analyze
     #[clap(long)]
-    pub end_epoch: Option<u64>,
+    pub end_epoch: Option<i64>,
 
     /// Analyze mode for the validator: [All, DetailedEpochTable, ValidatorHealthOverTime, NetworkHealthOverTime]
     #[clap(arg_enum, long)]
@@ -734,7 +743,7 @@ pub struct AnalyzeValidatorPerformance {
     pub(crate) profile_options: ProfileOptions,
 }
 
-#[derive(PartialEq, clap::ArgEnum, Clone)]
+#[derive(PartialEq, Eq, clap::ArgEnum, Clone)]
 pub enum AnalyzeMode {
     /// Print all other modes simultaneously
     All,
@@ -760,19 +769,37 @@ impl CliCommand<()> for AnalyzeValidatorPerformance {
         let client = self.rest_options.client(&self.profile_options.profile)?;
 
         let epochs =
-            FetchMetadata::fetch_new_block_events(&client, self.start_epoch, self.end_epoch)
+            FetchMetadata::fetch_new_block_events(&client, Some(self.start_epoch), self.end_epoch)
                 .await?;
         let mut stats = HashMap::new();
 
         let print_detailed = self.analyze_mode == AnalyzeMode::DetailedEpochTable
             || self.analyze_mode == AnalyzeMode::All;
         for epoch_info in epochs {
-            let epoch_stats = AnalyzeValidators::analyze(epoch_info.blocks, &epoch_info.validators);
+            let epoch_stats =
+                AnalyzeValidators::analyze(&epoch_info.blocks, &epoch_info.validators);
             if print_detailed {
-                println!("Detailed table for epoch {}:", epoch_info.epoch);
-                AnalyzeValidators::print_detailed_epoch_table(&epoch_stats, None, true);
+                println!(
+                    "Detailed table for {}epoch {}:",
+                    if epoch_info.partial { "partial " } else { "" },
+                    epoch_info.epoch
+                );
+                AnalyzeValidators::print_detailed_epoch_table(
+                    &epoch_stats,
+                    Some((
+                        "voting_power",
+                        &epoch_info
+                            .validators
+                            .iter()
+                            .map(|v| (v.address, v.voting_power.to_string()))
+                            .collect::<HashMap<_, _>>(),
+                    )),
+                    true,
+                );
             }
-            stats.insert(epoch_info.epoch, epoch_stats);
+            if !epoch_info.partial {
+                stats.insert(epoch_info.epoch, epoch_stats);
+            }
         }
 
         if stats.is_empty() {

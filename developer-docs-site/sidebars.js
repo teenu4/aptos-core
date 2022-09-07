@@ -22,17 +22,16 @@ const sidebars = {
 
     {
       type: "category",
-      label: "Aptos Quickstarts",
+      label: "Developer Tutorials",
       link: { type: "doc", id: "tutorials/index" },
       collapsible: true,
       collapsed: true,
       items: [
-        "tutorials/first-transaction-sdk",
         "tutorials/first-transaction",
+        "tutorials/your-first-nft",
         "tutorials/first-move-module",
         "tutorials/first-dapp",
-        "tutorials/first-coin",
-        "tutorials/your-first-nft",
+        // "tutorials/first-coin",
       ],
     },
     {
@@ -74,7 +73,11 @@ const sidebars = {
           link: { type: "doc", id: "guides/move-guides/index" },
           collapsible: true,
           collapsed: true,
-          items: ["guides/move-guides/move-on-aptos", "guides/move-guides/guide-move-transactional-testing"],
+          items: [
+            "guides/move-guides/move-on-aptos",
+            "guides/move-guides/upgrading-move-code",
+            "guides/move-guides/guide-move-transactional-testing",
+          ],
         },
       ],
     },
@@ -97,6 +100,7 @@ const sidebars = {
             "nodes/ait/steps-in-ait3",
             "nodes/ait/node-requirements",
             "nodes/ait/node-liveness-criteria",
+            "nodes/ait/ait3-leaderboard-metrics",
             "nodes/ait/connect-to-testnet",
             "nodes/ait/additional-doc",
           ],
@@ -117,7 +121,7 @@ const sidebars = {
         },
         {
           type: "category",
-          label: "FullNode for Devnet",
+          label: "Public Fullnode",
           link: { type: "doc", id: "nodes/full-node/index" },
           collapsible: true,
           collapsed: true,
@@ -147,14 +151,11 @@ const sidebars = {
       collapsible: true,
       collapsed: true,
       items: [
-        {
-          type: "link",
-          label: "Typescript SDK",
-          href: "https://aptos-labs.github.io/ts-sdk-doc/",
-        },
         "sdks/aptos-sdk-overview",
+        "sdks/typescript-sdk",
         "sdks/transactions-with-ts-sdk",
         "sdks/python-sdk",
+        "sdks/rust-sdk",
       ],
     },
     {
@@ -166,7 +167,14 @@ const sidebars = {
       items: ["cli-tools/aptos-cli-tool/install-aptos-cli", "cli-tools/aptos-cli-tool/use-aptos-cli"],
     },
     "reference/telemetry",
-    "aptos-white-paper",
+    {
+      type: "category",
+      label: "Aptos White Paper",
+      collapsible: true,
+      collapsed: true,
+      link: { type: "doc", id: "aptos-white-paper/index" },
+      items: ["aptos-white-paper/in-korean"],
+    },
     "reference/glossary",
   ],
 };
